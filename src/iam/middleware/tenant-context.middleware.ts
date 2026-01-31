@@ -1,4 +1,4 @@
-import { Injectable, NestMiddleware, ForbiddenException } from '@nestjs/common';
+import { Injectable, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -21,14 +21,15 @@ export class TenantContextMiddleware implements NestMiddleware {
 
   async use(req: Request, res: Response, next: NextFunction) {
     // Skip for public health checks or auth
-    if (req.path.includes('health') || req.path.includes('register')) return next();
+    if (req.path.includes('health') || req.path.includes('register'))
+      return next();
 
     // Identify Tenant via Subdomain (e.g., fintech.meru.com -> fintech)
     const host = req.headers.host;
     // In local dev, host might be localhost:3000. We handle that.
     // In prod, we expect subdomain.domain.tld
     const parts = host ? host.split('.') : [];
-    
+
     // Logic: If localhost, assume default or query param. If domain, use subdomain.
     let subdomain = 'default';
     if (host && !host.includes('localhost')) {
@@ -39,7 +40,9 @@ export class TenantContextMiddleware implements NestMiddleware {
 
     if (subdomain === 'default') return next(); // No tenant context needed
 
-    const tenant = await this.tenantRepo.findOne({ where: { slug: subdomain } });
+    const tenant = await this.tenantRepo.findOne({
+      where: { slug: subdomain },
+    });
     if (tenant) {
       req.meruTenant = tenant;
     }

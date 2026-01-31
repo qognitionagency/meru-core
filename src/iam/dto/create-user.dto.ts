@@ -1,7 +1,7 @@
 import { IsString, IsEmail, MinLength } from 'class-validator';
-import { VerticalType } from '../enums/vertical.enum';
+import { CreateUserInput } from '../../common/types';
 
-export class CreateUserDto {
+export class CreateUserDto implements CreateUserInput {
   @IsString()
   tenantSlug: string; // Used to find tenant
 

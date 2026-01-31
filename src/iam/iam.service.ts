@@ -5,6 +5,7 @@ import { JwtService } from '@nestjs/jwt';
 import { User } from './entities/user.entity';
 import { Tenant } from './entities/tenant.entity';
 import { AuthProvider } from './enums/auth-provider.enum';
+import { UserPayload, CreateUserInput } from '../common/types';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -15,34 +16,43 @@ export class IamService {
     private jwtService: JwtService,
   ) {}
 
-  async validateUser(email: string, password: string): Promise<any> {
-    const user = await this.userRepo.findOne({ 
+  async validateUser(
+    email: string,
+    password: string,
+  ): Promise<UserPayload | null> {
+    const user = await this.userRepo.findOne({
       where: { email },
-      relations: ['tenant'] 
+      relations: ['tenant'],
     });
-    
-    if (user && await bcrypt.compare(password, user.password)) {
-      const { password, ...result } = user;
-      return result;
+
+    if (user && (await bcrypt.compare(password, user.password))) {
+      return {
+        id: user.id,
+        email: user.email,
+        tenantId: user.tenantId,
+        roles: user.roles,
+      };
     }
     return null;
   }
 
-  async login(user: any) {
-    const payload = { 
-      email: user.email, 
-      sub: user.id, 
+  login(user: UserPayload) {
+    const payload = {
+      email: user.email,
+      sub: user.id,
       tenantId: user.tenantId,
-      roles: user.roles
+      roles: user.roles,
     };
     return {
       access_token: this.jwtService.sign(payload),
     };
   }
 
-  async register(dto: any) {
+  async register(dto: CreateUserInput) {
     // Find Tenant
-    const tenant = await this.tenantRepo.findOne({ where: { slug: dto.tenantSlug } });
+    const tenant = await this.tenantRepo.findOne({
+      where: { slug: dto.tenantSlug },
+    });
     if (!tenant) throw new Error('Invalid Tenant Slug');
 
     const hashedPassword = await bcrypt.hash(dto.password, 10);

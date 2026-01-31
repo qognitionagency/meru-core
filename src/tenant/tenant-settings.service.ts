@@ -1,7 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { TenantSetting, VerticalConfig } from './entities/tenant-setting.entity';
+import {
+  TenantSetting,
+  VerticalConfig,
+} from './entities/tenant-setting.entity';
 
 @Injectable()
 export class TenantSettingsService {
@@ -11,7 +14,7 @@ export class TenantSettingsService {
   ) {}
 
   async getSettings(tenantId: string): Promise<VerticalConfig> {
-    let setting = await this.settingsRepo.findOne({ where: { tenantId } });
+    const setting = await this.settingsRepo.findOne({ where: { tenantId } });
 
     // If no custom settings exist, return default for Fintech (Fail-safe)
     if (!setting) {
@@ -38,7 +41,12 @@ export class TenantSettingsService {
       entityName: 'Customer',
       fields: [
         { key: 'taxId', type: 'text', label: 'Tax ID', required: true },
-        { key: 'riskScore', type: 'number', label: 'Risk Score', required: false },
+        {
+          key: 'riskScore',
+          type: 'number',
+          label: 'Risk Score',
+          required: false,
+        },
       ],
     };
   }

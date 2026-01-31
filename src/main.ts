@@ -4,7 +4,6 @@ import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './core/filters/http-exception.filter';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { CacheModule } from '@nestjs/cache-manager'; // Import to ensure it's registered globally if needed
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);

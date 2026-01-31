@@ -1,6 +1,7 @@
 import { IsEmail, IsString, MinLength } from 'class-validator';
+import { LoginInput } from '../../common/types';
 
-export class LoginDto {
+export class LoginDto implements LoginInput {
   @IsEmail({}, { message: 'Invalid email format' })
   email: string;
 

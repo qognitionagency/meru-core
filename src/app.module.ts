@@ -1,27 +1,69 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { AppConfigModule } from './config/config.module';
 import { IamModule } from './iam/iam.module';
+import { TenantModule } from './tenant/tenant.module';
+import { CrmModule } from './crm/crm.module';
+
+// --- IMPORT ALL ENTITIES ---
 import { User } from './iam/entities/user.entity';
 import { Tenant } from './iam/entities/tenant.entity';
+import { TenantSetting } from './tenant/entities/tenant-setting.entity';
+import { UniversalEntity } from './crm/entities/universal-entity.entity';
 
 @Module({
   imports: [
-    ConfigModule,
-    AppConfigModule, // Imports ConfigModule globally with validation
-    TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: process.env.DATABASE_HOST || 'localhost',
-      port: parseInt(process.env.DATABASE_PORT || '5432', 10),
-      username: process.env.DATABASE_USERNAME || 'meru_admin',
-      password: process.env.DATABASE_PASSWORD || 'ChangeMeSecurePassword123!',
-      database: process.env.DATABASE_NAME || 'meru_core_prod',
-      entities: [User, Tenant],
-      synchronize: process.env.NODE_ENV === 'development',
-      logging: true,
+    // 1. Configuration & Validation
+    AppConfigModule,
+
+    // 2. Event Emitter for @OnEvent decorators
+    EventEmitterModule.forRoot(),
+
+    // 3. Database Setup (Connecting all modules)
+    TypeOrmModule.forRootAsync({
+      imports: [AppConfigModule],
+      useFactory: (configService: ConfigService): any => {
+        const isDevelopment = configService.get('NODE_ENV') === 'development';
+        
+        const baseConfig = {
+          // CRITICAL: All entities from all modules must be listed here
+          // so TypeORM can manage them and create tables (if synchronize: true)
+          entities: [User, Tenant, TenantSetting, UniversalEntity],
+
+          // WARNING: synchronize: true is for DEVELOPMENT ONLY.
+          // It automatically creates/updates tables. Disable for Production!
+          synchronize: true, // Always true for development with SQLite
+
+          logging: isDevelopment,
+        };
+
+        if (isDevelopment) {
+          return {
+            ...baseConfig,
+            type: 'sqlite' as const,
+            database: 'meru-dev.db',
+          };
+        } else {
+          return {
+            ...baseConfig,
+            type: 'postgres' as const,
+            host: configService.get('database.host'),
+            port: configService.get('database.port'),
+            username: configService.get('database.username'),
+            password: configService.get('database.password'),
+            database: configService.get('database.name'),
+          };
+        }
+      },
+      inject: [ConfigService],
     }),
+
+    // 3. Feature Modules
     IamModule,
+    TenantModule,
+    CrmModule,
   ],
 })
 export class AppModule {}

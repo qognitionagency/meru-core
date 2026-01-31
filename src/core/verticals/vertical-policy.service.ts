@@ -16,7 +16,7 @@ export interface VerticalPolicy {
 @Injectable()
 export class VerticalPolicyService {
   private readonly logger = new Logger(VerticalPolicyService.name);
-  
+
   // Mock DB of Vertical Configs
   private verticalConfigs: Record<VerticalType, VerticalPolicy> = {
     [VerticalType.GRC]: {
@@ -70,7 +70,7 @@ export class VerticalPolicyService {
 
   async getPolicy(vertical: VerticalType): Promise<VerticalPolicy> {
     const cacheKey = `vertical_policy:${vertical}`;
-    
+
     // 1. Try Cache
     const cachedPolicy = await this.cacheManager.get<VerticalPolicy>(cacheKey);
     if (cachedPolicy) {
@@ -82,7 +82,7 @@ export class VerticalPolicyService {
 
     // 3. Set Cache (1 Hour TTL)
     await this.cacheManager.set(cacheKey, policy, 3600);
-    
+
     this.logger.log(`Policy loaded for ${vertical}`);
     return policy;
   }

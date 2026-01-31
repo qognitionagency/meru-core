@@ -10,6 +10,7 @@ import { User } from './entities/user.entity';
 import { Tenant } from './entities/tenant.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { SamlStrategy } from './strategies/saml.strategy';
+import { LocalStrategy } from './strategies/local.strategy';
 import { PolicyGuard } from './guards/policy.guard';
 import { TenantContextMiddleware } from './middleware/tenant-context.middleware';
 import { VerticalPolicyService } from '../core/verticals/vertical-policy.service';
@@ -30,11 +31,12 @@ import { VerticalPolicyService } from '../core/verticals/vertical-policy.service
   ],
   controllers: [IamController],
   providers: [
-    IamService, 
-    JwtStrategy, 
-    SamlStrategy, 
+    IamService,
+    JwtStrategy,
+    SamlStrategy,
+    LocalStrategy,
     PolicyGuard,
-    VerticalPolicyService
+    VerticalPolicyService,
   ],
 })
 export class IamModule {

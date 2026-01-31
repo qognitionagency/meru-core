@@ -1,5 +1,10 @@
-
-import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn } from 'typeorm';
+import {
+  Entity,
+  Column,
+  PrimaryGeneratedColumn,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
 import { Tenant } from './tenant.entity';
 import { AuthProvider } from '../enums/auth-provider.enum';
 

@@ -9,11 +9,11 @@ import { IamService } from './iam.service';
 import { User } from './entities/user.entity';
 import { Tenant } from './entities/tenant.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { SamlStrategy } from './strategies/saml.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
 import { PolicyGuard } from './guards/policy.guard';
 import { TenantContextMiddleware } from './middleware/tenant-context.middleware';
 import { VerticalPolicyService } from '../core/verticals/vertical-policy.service';
+import { CoreModule } from '../core/core.module';
 
 @Module({
   imports: [
@@ -28,15 +28,14 @@ import { VerticalPolicyService } from '../core/verticals/vertical-policy.service
       }),
       inject: [ConfigService],
     }),
+    CoreModule,
   ],
   controllers: [IamController],
   providers: [
     IamService,
     JwtStrategy,
-    SamlStrategy,
     LocalStrategy,
     PolicyGuard,
-    VerticalPolicyService,
   ],
 })
 export class IamModule {

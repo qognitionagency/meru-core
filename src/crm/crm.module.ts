@@ -4,9 +4,10 @@ import { CrmController } from './crm.controller';
 import { CrmService } from './crm.service';
 import { UniversalEntity } from './entities/universal-entity.entity';
 import { TenantModule } from '../tenant/tenant.module'; // Import to inject settings service
+import { CoreModule } from '../core/core.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([UniversalEntity]), TenantModule],
+  imports: [TypeOrmModule.forFeature([UniversalEntity]), TenantModule, CoreModule],
   controllers: [CrmController],
   providers: [CrmService],
 })

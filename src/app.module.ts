@@ -26,36 +26,25 @@ import { UniversalEntity } from './crm/entities/universal-entity.entity';
       imports: [AppConfigModule],
       useFactory: (configService: ConfigService): any => {
         const isDevelopment = configService.get('NODE_ENV') === 'development';
-        
-        const baseConfig = {
+
+        return {
+          type: 'postgres' as const,
+          host: configService.get('database.host'),
+          port: configService.get('database.port'),
+          username: configService.get('database.username'),
+          password: configService.get('database.password'),
+          database: configService.get('database.name'),
+
           // CRITICAL: All entities from all modules must be listed here
           // so TypeORM can manage them and create tables (if synchronize: true)
           entities: [User, Tenant, TenantSetting, UniversalEntity],
 
           // WARNING: synchronize: true is for DEVELOPMENT ONLY.
           // It automatically creates/updates tables. Disable for Production!
-          synchronize: true, // Always true for development with SQLite
+          synchronize: false, // Disabled for production - use migrations
 
           logging: isDevelopment,
         };
-
-        if (isDevelopment) {
-          return {
-            ...baseConfig,
-            type: 'sqlite' as const,
-            database: 'meru-dev.db',
-          };
-        } else {
-          return {
-            ...baseConfig,
-            type: 'postgres' as const,
-            host: configService.get('database.host'),
-            port: configService.get('database.port'),
-            username: configService.get('database.username'),
-            password: configService.get('database.password'),
-            database: configService.get('database.name'),
-          };
-        }
       },
       inject: [ConfigService],
     }),

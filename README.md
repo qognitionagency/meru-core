@@ -23,13 +23,69 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository with Supabase PostgreSQL database integration and Swagger API documentation.
 
 ## Project setup
+
+### Prerequisites
+
+- Node.js (v18 or higher)
+- pnpm
+- A Supabase project
+
+### 1. Install dependencies
 
 ```bash
 $ pnpm install
 ```
+
+### 2. Set up Supabase Database
+
+1. Create a new project on [Supabase](https://supabase.com)
+2. Go to your project settings > Database and note down:
+   - Host: `your-project-ref.supabase.co`
+   - Database: `postgres`
+   - Username: `postgres`
+   - Password: Your database password
+
+### 3. Environment configuration
+
+Copy the example environment file and fill in your Supabase database credentials:
+
+```bash
+$ cp .env.example .env
+```
+
+Edit `.env` with your actual database values:
+
+```env
+# Database (Supabase PostgreSQL)
+DATABASE_HOST=your-project-ref.supabase.co
+DATABASE_PORT=5432
+DATABASE_USERNAME=postgres
+DATABASE_PASSWORD=your-database-password
+DATABASE_NAME=postgres
+```
+
+### 4. Database setup
+
+The application uses TypeORM with PostgreSQL. Tables will be automatically created in development mode (`synchronize: true`).
+
+## API Documentation
+
+The API documentation is available via Swagger UI at `/api` when the application is running.
+
+## API Endpoints
+
+### Authentication
+
+- `POST /api/v1/auth/login` - Login with email/password
+- `GET /api/v1/auth/profile` - Get user profile (requires JWT token)
+
+### CRM
+
+- `POST /api/v1/crm/entities` - Create a new CRM entity
+- `GET /api/v1/crm/entities` - Get all CRM entities for the tenant
 
 ## Compile and run the project
 

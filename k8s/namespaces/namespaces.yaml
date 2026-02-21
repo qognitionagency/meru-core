@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meru-production
+  labels:
+    environment: production
+    vertical: meru
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meru-staging
+  labels:
+    environment: staging
+    vertical: meru
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meru-dev
+  labels:
+    environment: development
+    vertical: meru
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: immigration-production
+  labels:
+    environment: production
+    vertical: immigration
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: immigration-staging
+  labels:
+    environment: staging
+    vertical: immigration
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: immigration-dev
+  labels:
+    environment: development
+    vertical: immigration
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grc-production
+  labels:
+    environment: production
+    vertical: grc
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grc-staging
+  labels:
+    environment: staging
+    vertical: grc
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grc-dev
+  labels:
+    environment: development
+    vertical: grc
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    environment: shared
+    security-level: enterprise
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-dns
+  labels:
+    environment: shared
+    security-level: enterprise

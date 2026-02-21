@@ -16,7 +16,9 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { CrmService } from './crm.service';
 import { CreateEntityDto } from './dto/create-entity.dto';
-import { PolicyGuard } from '../iam/guards/policy.guard'; // Use our Context-Aware Guard
+import { PolicyGuard } from '../iam/guards/policy.guard';
+import { SearchService } from '../search/search.service';
+import { OnModuleInit } from '@nestjs/common'; // Use our Context-Aware Guard
 
 @Controller('crm')
 @ApiTags('crm')

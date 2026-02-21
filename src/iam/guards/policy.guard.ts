@@ -32,11 +32,10 @@ export class PolicyGuard implements CanActivate {
     // 1. Load Vertical Policy (Cached)
     const policy = await this.verticalPolicyService.getPolicy(tenant.vertical);
 
-    // 2. Role Check
-    const requiredRoles = this.reflector.get<string[]>(
-      'roles',
+    const requiredRoles = this.reflector.getAllAndOverride<string[]>('roles', [
       context.getHandler(),
-    );
+      context.getClass(),
+    ]);
     if (
       requiredRoles &&
       !requiredRoles.some((role) => user.roles.includes(role))

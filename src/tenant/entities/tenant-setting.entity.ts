@@ -35,6 +35,12 @@ export class TenantSetting {
   @JoinColumn({ name: 'tenantId' })
   tenant: Tenant;
 
+  @Column({ nullable: true })
+  vertical: string;
+
+  @Column({ nullable: true })
+  environment: string;
+
   // The JSON Configuration Pack
   @Column({ type: 'jsonb', default: {} })
   config: VerticalConfig;

@@ -1,52 +1,200 @@
-import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Injectable, NestMiddleware, Logger, BadRequestException } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Tenant } from '../entities/tenant.entity';
+import { Repository, DataSource } from 'typeorm';
+import { Tenant, TenantStatus } from '../entities/tenant.entity';
+import { VerticalType } from '../enums/vertical.enum';
 
 declare global {
   namespace Express {
     interface Request {
       meruTenant?: Tenant;
+      tenantId?: string;
+      tenantSlug?: string;
+      vertical?: VerticalType;
+      environment?: 'development' | 'staging' | 'production';
+      host?: string;
     }
   }
 }
 
 @Injectable()
 export class TenantContextMiddleware implements NestMiddleware {
+  private readonly logger = new Logger(TenantContextMiddleware.name);
+
+  // Domain mapping
+  private readonly domainMapping: Record<string, { vertical: VerticalType; baseUrl: string }> = {
+    'api.immistack.com': {
+      vertical: VerticalType.IMMIGRATION,
+      baseUrl: 'immistack.com',
+    },
+    'api.governancex.com': {
+      vertical: VerticalType.GRC,
+      baseUrl: 'governancex.com',
+    },
+    'api.meru.com': {
+      vertical: VerticalType.IMMIGRATION as any, // Core platform
+      baseUrl: 'meru.com',
+    },
+  };
+
+  // Environment prefix mapping
+  private readonly envPrefixes: Record<string, 'development' | 'staging' | 'production'> = {
+    'dev-api': 'development',
+    'staging-api': 'staging',
+    'api': 'production',
+  };
+
   constructor(
     @InjectRepository(Tenant)
     private tenantRepo: Repository<Tenant>,
+    private dataSource: DataSource,
   ) {}
 
   async use(req: Request, res: Response, next: NextFunction) {
-    // Skip for public health checks or auth
-    if (req.path.includes('health') || req.path.includes('register'))
+    // Skip for public endpoints (health, signup, login, etc.)
+    if (this.isPublicEndpoint(req.path)) {
       return next();
-
-    // Identify Tenant via Subdomain (e.g., fintech.meru.com -> fintech)
-    const host = req.headers.host;
-    // In local dev, host might be localhost:3000. We handle that.
-    // In prod, we expect subdomain.domain.tld
-    const parts = host ? host.split('.') : [];
-
-    // Logic: If localhost, assume default or query param. If domain, use subdomain.
-    let subdomain = 'default';
-    if (host && !host.includes('localhost')) {
-      subdomain = parts[0];
-    } else if (req.query.tenant) {
-      subdomain = req.query.tenant as string; // For local testing via query param
     }
 
-    if (subdomain === 'default') return next(); // No tenant context needed
+    const host = req.headers.host?.split(':')[0]; // Remove port if present
 
-    const tenant = await this.tenantRepo.findOne({
-      where: { slug: subdomain },
-    });
-    if (tenant) {
-      req.meruTenant = tenant;
+    if (!host) {
+      return next();
     }
 
-    next();
+    // Extract environment and domain
+    const context = this.extractContext(host || '');
+
+    if (!context) {
+      // Unknown domain - let it through (will be handled by specific guards)
+      return next();
+    }
+
+    try {
+      // Set environment in request
+      req.environment = context.environment;
+      req.vertical = context.vertical;
+
+      // Set RLS context in PostgreSQL for vertical isolation
+      await this.setRLSContext(context.vertical, context.environment);
+
+      // Log context for debugging (production: disable)
+      if (process.env.NODE_ENV === 'development') {
+        this.logger.debug(
+          `Context set: ${context.environment} - ${context.vertical} (${host})`,
+        );
+      }
+
+      next();
+    } catch (error) {
+      this.logger.error(`Error setting context: ${error.message}`);
+      next(); // Continue without context
+    }
+  }
+
+  private extractContext(host: string): {
+    vertical: VerticalType;
+    environment: 'development' | 'staging' | 'production';
+    baseUrl: string;
+  } | null {
+    // Handle localhost with query parameters for testing
+    // Example: localhost:3000?vertical=immigration&env=staging
+    if (host.includes('localhost')) {
+      const queryEnv = process.env.TEST_ENV || 'development';
+      const queryVertical = process.env.TEST_VERTICAL || VerticalType.IMMIGRATION;
+
+      if (Object.values(VerticalType).includes(queryVertical as any)) {
+        return {
+          vertical: queryVertical as VerticalType,
+          environment: queryEnv as any,
+          baseUrl: 'localhost',
+        };
+      }
+      return null;
+    }
+
+    // Parse the host: env-prefix.vertical-domain.com
+    // Examples:
+    //   api.immistack.com → production, immigration
+    //   staging-api.immistack.com → staging, immigration
+    //   dev-api.immistack.com → development, immigration
+
+    const parts = host.split('.');
+
+    // Handle subdomain structure: [env-prefix, api, vertical-domain, com]
+    if (parts.length >= 3) {
+      const envPrefix = parts[0]; // api, staging-api, dev-api
+      const apiPart = parts[1]; // api (must be present)
+      const domain = parts.slice(1).join('.'); // api.immistack.com or api.governancex.com
+
+      // Find matching domain
+      const domainConfig = this.domainMapping[domain];
+
+      if (domainConfig && apiPart === 'api') {
+        const environment = this.envPrefixes[envPrefix];
+
+        if (environment) {
+          return {
+            vertical: domainConfig.vertical,
+            environment,
+            baseUrl: domainConfig.baseUrl,
+          };
+        }
+      }
+    }
+
+    // Handle api.meru.com (main platform)
+    if (host === 'api.meru.com' || host === 'staging-api.meru.com' || host === 'dev-api.meru.com') {
+      const parts = host.split('.');
+      const envPrefix = parts[0];
+      const environment = this.envPrefixes[envPrefix];
+
+      return {
+        vertical: VerticalType.IMMIGRATION as any, // Core platform
+        environment: environment || 'production',
+        baseUrl: 'meru.com',
+      };
+    }
+
+    return null;
+  }
+
+  private async setRLSContext(vertical: VerticalType, environment: string): Promise<void> {
+    const queryRunner = this.dataSource.createQueryRunner();
+
+    try {
+      await queryRunner.connect();
+
+      // Set PostgreSQL RLS context for vertical AND environment
+      await queryRunner.query(
+        `SELECT app.set_context($1, $2)`,
+        [vertical, environment],
+      );
+
+      this.logger.debug(`RLS context set: ${vertical} (${environment})`);
+    } catch (error) {
+      this.logger.error(`Failed to set RLS context: ${error.message}`);
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  private isPublicEndpoint(path: string): boolean {
+    const publicPaths = [
+      '/health',
+      '/api/v1/auth/login',
+      '/api/v1/auth/register',
+      '/api/v1/tenants/signup',
+      '/api/v1/tenants/check-slug',
+      '/api-docs',
+      '/api',
+      '/swagger',
+      '/favicon.ico',
+      '/static',
+      '/public',
+    ];
+
+    return publicPaths.some(publicPath => path.startsWith(publicPath));
   }
 }

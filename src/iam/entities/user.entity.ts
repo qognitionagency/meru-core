@@ -20,6 +20,12 @@ export class User {
   @JoinColumn({ name: 'tenantId' })
   tenant: Tenant;
 
+  @Column({ nullable: true })
+  vertical: string;
+
+  @Column({ nullable: true })
+  environment: string;
+
   @Column({ unique: true })
   email: string;
 

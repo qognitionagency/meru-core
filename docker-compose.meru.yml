@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  # Production Container
+  meru-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meru-prod
+    environment:
+      - NODE_ENV=production
+      - VERTICAL=meru
+      - PORT=3000
+      - DATABASE_HOST=${DB_HOST}
+      - DATABASE_PORT=5432
+      - DATABASE_USERNAME=${DB_USERNAME}
+      - DATABASE_PASSWORD=${DB_PASSWORD}
+      - DATABASE_NAME=meru_prod
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=ap-south-1
+      - AWS_S3_BUCKET=meru-documents
+      - JWT_SECRET=${JWT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    networks:
+      - meru-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Staging Container
+  meru-staging:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meru-staging
+    environment:
+      - NODE_ENV=staging
+      - VERTICAL=meru
+      - PORT=3000
+      - DATABASE_HOST=${DB_HOST}
+      - DATABASE_PORT=5432
+      - DATABASE_USERNAME=${DB_USERNAME}
+      - DATABASE_PASSWORD=${DB_PASSWORD}
+      - DATABASE_NAME=meru_staging
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=ap-south-1
+      - AWS_S3_BUCKET=meru-documents
+      - JWT_SECRET=${JWT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+    networks:
+      - meru-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Development Container
+  meru-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meru-dev
+    environment:
+      - NODE_ENV=development
+      - VERTICAL=meru
+      - PORT=3000
+      - DATABASE_HOST=${DB_HOST}
+      - DATABASE_PORT=5432
+      - DATABASE_USERNAME=${DB_USERNAME}
+      - DATABASE_PASSWORD=${DB_PASSWORD}
+      - DATABASE_NAME=meru_dev
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=ap-south-1
+      - AWS_S3_BUCKET=meru-documents
+      - JWT_SECRET=${JWT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "3002:3000"
+    restart: unless-stopped
+    networks:
+      - meru-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Grafana + Prometheus (Monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - meru-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - meru-network
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  meru-network:
+    driver: bridge

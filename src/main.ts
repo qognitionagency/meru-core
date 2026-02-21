@@ -34,6 +34,9 @@ async function bootstrap() {
     .addTag('crm', 'CRM endpoints')
     .addTag('iam', 'Identity and Access Management')
     .addTag('tenant', 'Tenant management')
+    .addTag('search', 'Universal Search')
+    .addTag('ai', 'AI Gateway')
+    .addTag('documents', 'Document & Media Engine')
     .addBearerAuth(
       {
         type: 'http',

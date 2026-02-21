@@ -1,0 +1,84 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'meru-enterprise'
+    region: 'ap-south-1'
+
+scrape_configs:
+  # Meru Core Application (Production)
+  - job_name: 'meru-prod'
+    static_configs:
+      - targets: ['host.docker.internal:3000']
+        labels:
+          vertical: 'meru'
+          environment: 'production'
+
+  # Meru Core Application (Staging)
+  - job_name: 'meru-staging'
+    static_configs:
+      - targets: ['host.docker.internal:3001']
+        labels:
+          vertical: 'meru'
+          environment: 'staging'
+
+  # Meru Core Application (Dev)
+  - job_name: 'meru-dev'
+    static_configs:
+      - targets: ['host.docker.internal:3002']
+        labels:
+          vertical: 'meru'
+          environment: 'development'
+
+  # Immigration Application (Production)
+  - job_name: 'immigration-prod'
+    static_configs:
+      - targets: ['host.docker.internal:3000']
+        labels:
+          vertical: 'immigration'
+          environment: 'production'
+
+  # Immigration Application (Staging)
+  - job_name: 'immigration-staging'
+    static_configs:
+      - targets: ['host.docker.internal:3001']
+        labels:
+          vertical: 'immigration'
+          environment: 'staging'
+
+  # Immigration Application (Dev)
+  - job_name: 'immigration-dev'
+    static_configs:
+      - targets: ['host.docker.internal:3002']
+        labels:
+          vertical: 'immigration'
+          environment: 'development'
+
+  # GRC Application (Production)
+  - job_name: 'grc-prod'
+    static_configs:
+      - targets: ['host.docker.internal:3000']
+        labels:
+          vertical: 'grc'
+          environment: 'production'
+
+  # GRC Application (Staging)
+  - job_name: 'grc-staging'
+    static_configs:
+      - targets: ['host.docker.internal:3001']
+        labels:
+          vertical: 'grc'
+          environment: 'staging'
+
+  # GRC Application (Dev)
+  - job_name: 'grc-dev'
+    static_configs:
+      - targets: ['host.docker.internal:3002']
+        labels:
+          vertical: 'grc'
+          environment: 'development'
+
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

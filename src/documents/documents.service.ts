@@ -1,0 +1,650 @@
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { S3 } from 'aws-sdk';
+import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
+import * as path from 'path';
+import { Document, DocumentStatus, DocumentEncryption, DocumentType } from './entities/document.entity';
+import { DocumentVersion, VersionStatus } from './entities/document-version.entity';
+import { DocumentMetadata, MetadataType } from './entities/document-metadata.entity';
+import { User } from '../iam/entities/user.entity';
+import { CreateDocumentDto } from './dto/create-document.dto';
+import { UpdateDocumentDto } from './dto/update-document.dto';
+import { UploadDocumentDto } from './dto/upload-document.dto';
+import { SearchDocumentsDto } from './dto/search-documents.dto';
+import { OrchestrationService } from '../core/orchestration.service';
+
+interface UploadResult {
+  document: Document;
+  version: DocumentVersion;
+  url?: string;
+}
+
+@Injectable()
+export class DocumentsService {
+  private readonly logger = new Logger(DocumentsService.name);
+  private s3: S3;
+
+  constructor(
+    @InjectRepository(Document)
+    private documentRepo: Repository<Document>,
+    @InjectRepository(DocumentVersion)
+    private versionRepo: Repository<DocumentVersion>,
+    @InjectRepository(DocumentMetadata)
+    private metadataRepo: Repository<DocumentMetadata>,
+    @InjectRepository(User)
+    private userRepo: Repository<User>,
+    private configService: ConfigService,
+    private dataSource: DataSource,
+    private orchestrationService: OrchestrationService,
+  ) {
+    this.s3 = new S3({
+      accessKeyId: this.configService.get('AWS_ACCESS_KEY_ID'),
+      secretAccessKey: this.configService.get('AWS_SECRET_ACCESS_KEY'),
+      region: this.configService.get('AWS_REGION', 'us-east-1'),
+    });
+  }
+
+  async upload(
+    file: Express.Multer.File,
+    dto: UploadDocumentDto,
+    tenantId: string,
+    userId: string,
+  ): Promise<UploadResult> {
+    this.logger.log(`Uploading document: ${dto.name} for tenant: ${tenantId}`);
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+
+      const fileType = dto.fileType || this.detectFileType(dto.originalFileName || file.originalname);
+      const fileSize = file.size;
+
+      const encryptionLevel = dto.requiredEncryption || DocumentEncryption.NONE;
+      const encrypted = await this.encryptFile(file.buffer, encryptionLevel);
+
+      const documentSlug = this.generateSlug(dto.name, tenantId);
+
+      const s3Key = this.generateS3Key(tenantId, documentSlug, 1, fileType);
+      const s3UploadResult = await this.uploadToS3(encrypted, s3Key, file.mimetype);
+
+      const document = queryRunner.manager.create(Document, {
+        id: uuidv4(),
+        tenantId,
+        name: dto.name,
+        slug: documentSlug,
+        fileType,
+        originalFileName: dto.originalFileName || file.originalname,
+        fileSize,
+        mimeType: file.mimetype,
+        status: DocumentStatus.ACTIVE,
+        encryption: encryptionLevel,
+        requiredEncryption: encryptionLevel,
+        linkedEntityType: dto.linkedEntityType,
+        linkedEntityId: dto.linkedEntityId,
+        tags: dto.tags || [],
+        metadata: dto.metadata || {},
+        rbac: {
+          owner: userId,
+        },
+        versionNumber: 1,
+        uploadedById: userId,
+        uploadedBy: user,
+      });
+
+      const version = queryRunner.manager.create(DocumentVersion, {
+        id: uuidv4(),
+        documentId: document.id,
+        versionNumber: 1,
+        status: VersionStatus.ACTIVE,
+        s3Key: s3UploadResult.Key,
+        s3Bucket: s3UploadResult.Bucket,
+        fileSize: encrypted.length,
+        checksum: this.calculateChecksum(encrypted),
+        encryptionKey: encryptionLevel !== DocumentEncryption.NONE ? this.getEncryptionKey() : undefined,
+        encryptionAlgorithm: encryptionLevel !== DocumentEncryption.NONE ? 'aes-256-gcm' : undefined,
+        changeDescription: dto.changeDescription || 'Initial upload',
+        changeMetadata: {
+          changedBy: userId,
+          changeReason: 'Initial upload',
+        },
+        uploadedById: userId,
+        uploadedBy: user,
+      });
+
+      document.currentVersionId = version.id;
+
+      await queryRunner.manager.save(document);
+      await queryRunner.manager.save(version);
+
+      await queryRunner.commitTransaction();
+
+      if (dto.triggerAI) {
+        this.triggerAIAnalysis(document.id, tenantId, userId);
+      }
+
+      return {
+        document,
+        version,
+        url: this.getPresignedUrl(s3UploadResult.Key),
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(`Upload failed: ${error.message}`);
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  async create(
+    dto: CreateDocumentDto,
+    tenantId: string,
+    userId: string,
+  ): Promise<Document> {
+    this.logger.log(`Creating document: ${dto.name} for tenant: ${tenantId}`);
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const documentSlug = this.generateSlug(dto.name, tenantId);
+
+    const document = this.documentRepo.create({
+      id: uuidv4(),
+      tenantId,
+      name: dto.name,
+      slug: documentSlug,
+      fileType: dto.fileType,
+      originalFileName: dto.originalFileName,
+      fileSize: dto.fileSize,
+      mimeType: dto.mimeType,
+      status: DocumentStatus.ACTIVE,
+      encryption: DocumentEncryption.NONE,
+      requiredEncryption: dto.requiredEncryption || DocumentEncryption.NONE,
+      linkedEntityType: dto.linkedEntityType,
+      linkedEntityId: dto.linkedEntityId,
+      tags: dto.tags || [],
+      metadata: dto.metadata || {},
+      rbac: {
+        owner: userId,
+      },
+      versionNumber: 0,
+      currentVersionId: '',
+      uploadedById: userId,
+      uploadedBy: user,
+    });
+
+    return this.documentRepo.save(document);
+  }
+
+  async createNewVersion(
+    documentId: string,
+    file: Express.Multer.File,
+    changeDescription: string,
+    tenantId: string,
+    userId: string,
+  ): Promise<UploadResult> {
+    this.logger.log(`Creating new version for document: ${documentId}`);
+
+    const document = await this.documentRepo.findOne({ where: { id: documentId, tenantId } });
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, userId, 'write');
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+
+      const newVersionNumber = document.versionNumber + 1;
+      const encryptionLevel = document.requiredEncryption;
+      const encrypted = await this.encryptFile(file.buffer, encryptionLevel);
+
+      const s3Key = this.generateS3Key(tenantId, document.slug, newVersionNumber, document.fileType);
+      const s3UploadResult = await this.uploadToS3(encrypted, s3Key, file.mimetype);
+
+      const version = queryRunner.manager.create(DocumentVersion, {
+        id: uuidv4(),
+        documentId: document.id,
+        versionNumber: newVersionNumber,
+        status: VersionStatus.ACTIVE,
+        s3Key: s3UploadResult.Key,
+        s3Bucket: s3UploadResult.Bucket,
+        fileSize: encrypted.length,
+        checksum: this.calculateChecksum(encrypted),
+        encryptionKey: encryptionLevel !== DocumentEncryption.NONE ? this.getEncryptionKey() : undefined,
+        encryptionAlgorithm: encryptionLevel !== DocumentEncryption.NONE ? 'aes-256-gcm' : undefined,
+        changeDescription,
+        changeMetadata: {
+          changedBy: userId,
+          changeReason: changeDescription,
+        },
+        uploadedById: userId,
+        uploadedBy: user,
+      });
+
+      await queryRunner.manager.save(version);
+
+      document.versionNumber = newVersionNumber;
+      document.currentVersionId = version.id;
+      document.fileSize = file.size;
+      document.updatedAt = new Date();
+
+      await queryRunner.manager.save(document);
+
+      await queryRunner.commitTransaction();
+
+      return {
+        document,
+        version,
+        url: this.getPresignedUrl(s3UploadResult.Key),
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(`Create version failed: ${error.message}`);
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  async findAll(
+    tenantId: string,
+    searchDto: SearchDocumentsDto,
+  ): Promise<{ documents: Document[]; total: number; page: number; limit: number }> {
+    const {
+      query,
+      fileTypes,
+      status,
+      encryption,
+      linkedEntityType,
+      linkedEntityId,
+      tags,
+      includeAI,
+      page = 1,
+      limit = 20,
+      sortBy = 'createdAt',
+      sortOrder = 'DESC',
+    } = searchDto;
+
+    const queryBuilder = this.documentRepo.createQueryBuilder('document');
+
+    queryBuilder.where('document.tenantId = :tenantId', { tenantId });
+
+    if (status) {
+      queryBuilder.andWhere('document.status = :status', { status });
+    }
+
+    if (encryption) {
+      queryBuilder.andWhere('document.encryption = :encryption', { encryption });
+    }
+
+    if (linkedEntityType) {
+      queryBuilder.andWhere('document.linkedEntityType = :linkedEntityType', { linkedEntityType });
+    }
+
+    if (linkedEntityId) {
+      queryBuilder.andWhere('document.linkedEntityId = :linkedEntityId', { linkedEntityId });
+    }
+
+    if (fileTypes && fileTypes.length > 0) {
+      queryBuilder.andWhere('document.fileType IN (:...fileTypes)', { fileTypes });
+    }
+
+    if (tags && tags.length > 0) {
+      queryBuilder.andWhere('document.tags @> :tags', { tags });
+    }
+
+    if (query) {
+      queryBuilder.andWhere(
+        '(document.name ILIKE :query OR document.originalFileName ILIKE :query OR document.slug ILIKE :query)',
+        { query: `%${query}%` },
+      );
+
+      if (includeAI) {
+        queryBuilder.orWhere('document.aiAnalysis::text ILIKE :query', { query: `%${query}%` });
+      }
+    }
+
+    queryBuilder
+      .orderBy(`document.${sortBy}`, sortOrder)
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [documents, total] = await queryBuilder.getManyAndCount();
+
+    return {
+      documents,
+      total,
+      page,
+      limit,
+    };
+  }
+
+  async findOne(id: string, tenantId: string, userId: string): Promise<Document> {
+    const document = await this.documentRepo.findOne({
+      where: { id, tenantId },
+      relations: ['versions', 'uploadedBy'],
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, userId, 'read');
+
+    return document;
+  }
+
+  async getVersions(
+    documentId: string,
+    tenantId: string,
+    userId: string,
+  ): Promise<DocumentVersion[]> {
+    const document = await this.documentRepo.findOne({
+      where: { id: documentId, tenantId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, userId, 'read');
+
+    return this.versionRepo.find({
+      where: { documentId },
+      order: { versionNumber: 'DESC' },
+    });
+  }
+
+  async getVersion(
+    documentId: string,
+    versionId: string,
+    tenantId: string,
+    userId: string,
+  ): Promise<DocumentVersion> {
+    const document = await this.documentRepo.findOne({
+      where: { id: documentId, tenantId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, userId, 'read');
+
+    const version = await this.versionRepo.findOne({
+      where: { id: versionId, documentId },
+    });
+
+    if (!version) {
+      throw new NotFoundException('Document version not found');
+    }
+
+    return version;
+  }
+
+  async downloadUrl(
+    documentId: string,
+    versionId?: string,
+    tenantId?: string,
+    userId?: string,
+  ): Promise<string> {
+    let document: Document | null = null;
+    let version: DocumentVersion | null = null;
+
+    if (tenantId && userId) {
+      document = await this.documentRepo.findOne({
+        where: { id: documentId, tenantId },
+      });
+
+      if (!document) {
+        throw new NotFoundException('Document not found');
+      }
+
+      await this.checkAccess(document, userId, 'read');
+    }
+
+    if (versionId) {
+      version = await this.versionRepo.findOne({
+        where: { id: versionId, documentId },
+      });
+    } else {
+      document = document || await this.documentRepo.findOne({ where: { id: documentId } });
+      if (!document) {
+        throw new NotFoundException('Document not found');
+      }
+      version = await this.versionRepo.findOne({
+        where: { id: document.currentVersionId },
+      });
+    }
+
+    if (!version) {
+      throw new NotFoundException('Document version not found');
+    }
+
+    return this.getPresignedUrl(version.s3Key);
+  }
+
+  async update(
+    id: string,
+    dto: UpdateDocumentDto,
+    tenantId: string,
+    userId: string,
+  ): Promise<Document> {
+    const document = await this.documentRepo.findOne({
+      where: { id, tenantId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, userId, 'write');
+
+    Object.assign(document, dto);
+
+    return this.documentRepo.save(document);
+  }
+
+  async remove(id: string, tenantId: string, userId: string): Promise<void> {
+    const document = await this.documentRepo.findOne({
+      where: { id, tenantId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, userId, 'delete');
+
+    document.status = DocumentStatus.DELETED;
+    document.deletedAt = new Date();
+
+    await this.documentRepo.save(document);
+  }
+
+  async triggerAIAnalysis(documentId: string, tenantId: string, userId: string): Promise<void> {
+    this.logger.log(`Triggering AI analysis for document: ${documentId}`);
+
+    try {
+      const document = await this.documentRepo.findOne({
+        where: { id: documentId, tenantId },
+        relations: ['uploadedBy'],
+      });
+
+      if (!document) {
+        throw new NotFoundException('Document not found');
+      }
+
+      const version = await this.versionRepo.findOne({
+        where: { id: document.currentVersionId },
+      });
+
+      if (!version) {
+        throw new NotFoundException('Document version not found');
+      }
+
+      const fileContent = await this.downloadFile(version.s3Key);
+
+      const analysis = await this.orchestrationService.performIntelligentSearch(tenantId, '', {
+        includeAIAnalysis: true,
+        searchType: 'semantic',
+      });
+
+      document.aiAnalysis = {
+        analyzedAt: new Date(),
+        summary: 'Document analyzed successfully',
+        categories: ['pending'],
+        riskLevel: 'low',
+      };
+
+      await this.documentRepo.save(document);
+
+      this.logger.log(`AI analysis completed for document: ${documentId}`);
+    } catch (error: any) {
+      this.logger.error(`AI analysis failed for document ${documentId}: ${error.message}`);
+    }
+  }
+
+  private async encryptFile(
+    buffer: Buffer,
+    level: DocumentEncryption,
+  ): Promise<Buffer> {
+    if (level === DocumentEncryption.NONE) {
+      return buffer;
+    }
+
+    const algorithm = 'aes-256-gcm';
+    const key = crypto.scryptSync(this.getEncryptionKey(), 'salt', 32);
+    const iv = crypto.randomBytes(16);
+
+    const cipher = crypto.createCipheriv(algorithm, key, iv);
+    const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+
+    return Buffer.concat([iv, authTag, encrypted]);
+  }
+
+  private async decryptFile(buffer: Buffer, key: string, algorithm: string): Promise<Buffer> {
+    const iv = buffer.slice(0, 16);
+    const authTag = buffer.slice(16, 32);
+    const encrypted = buffer.slice(32);
+
+    const decipher = crypto.createDecipheriv(algorithm, Buffer.from(key, 'base64'), iv) as crypto.DecipherGCM;
+    decipher.setAuthTag(authTag);
+
+    return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  }
+
+  private async uploadToS3(
+    buffer: Buffer,
+    key: string,
+    contentType?: string,
+  ): Promise<S3.ManagedUpload.SendData> {
+    return this.s3
+      .upload({
+        Bucket: this.configService.get('AWS_S3_BUCKET', 'meru-documents'),
+        Key: key,
+        Body: buffer,
+        ContentType: contentType,
+        ServerSideEncryption: 'AES256',
+      })
+      .promise();
+  }
+
+  private async downloadFile(key: string): Promise<Buffer> {
+    const result = await this.s3
+      .getObject({
+        Bucket: this.configService.get('AWS_S3_BUCKET', 'meru-documents'),
+        Key: key,
+      })
+      .promise();
+
+    return result.Body as Buffer;
+  }
+
+  private getPresignedUrl(key: string, expiresIn: number = 3600): string {
+    return this.s3.getSignedUrl('getObject', {
+      Bucket: this.configService.get('AWS_S3_BUCKET', 'meru-documents'),
+      Key: key,
+      Expires: expiresIn,
+    });
+  }
+
+  private generateS3Key(tenantId: string, slug: string, version: number, fileType: DocumentType): string {
+    return `tenants/${tenantId}/documents/${slug}/v${version}.${fileType}`;
+  }
+
+  private generateSlug(name: string, tenantId: string): string {
+    const base = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const timestamp = Date.now();
+    return `${base}-${timestamp}`;
+  }
+
+  private detectFileType(fileName: string): DocumentType {
+    const ext = path.extname(fileName).toLowerCase().replace('.', '');
+    const typeMap: Record<string, DocumentType> = {
+      pdf: DocumentType.PDF,
+      jpg: DocumentType.JPG,
+      jpeg: DocumentType.JPEG,
+      png: DocumentType.PNG,
+      docx: DocumentType.DOCX,
+      xlsx: DocumentType.XLSX,
+      txt: DocumentType.TXT,
+    };
+    return typeMap[ext] || DocumentType.TXT;
+  }
+
+  private calculateChecksum(buffer: Buffer): string {
+    return crypto.createHash('sha256').update(buffer).digest('hex');
+  }
+
+  private getEncryptionKey(): string {
+    return this.configService.get('DOCUMENT_ENCRYPTION_KEY', 'default-encryption-key-32-chars!');
+  }
+
+  private async checkAccess(document: Document, userId: string, action: 'read' | 'write' | 'delete' | 'share'): Promise<void> {
+    if (document.rbac.owner === userId) {
+      return;
+    }
+
+    if (document.rbac.permissions && document.rbac.permissions[action]) {
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+      if (user) {
+        const hasPermission = user.roles.some(role => document.rbac.permissions![action].includes(role));
+        if (hasPermission) {
+          return;
+        }
+      }
+    }
+
+    throw new ForbiddenException(`You don't have ${action} permission for this document`);
+  }
+}

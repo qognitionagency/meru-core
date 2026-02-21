@@ -20,6 +20,12 @@ export class UniversalEntity {
   @Column()
   tenantId: string;
 
+  @Column({ nullable: true })
+  vertical: string;
+
+  @Column({ nullable: true })
+  environment: string;
+
   @Column({ type: 'enum', enum: EntityType })
   type: EntityType;
 

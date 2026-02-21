@@ -3,22 +3,24 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { CacheModule } from '@nestjs/cache-manager';
 import { IamController } from './iam.controller';
 import { IamService } from './iam.service';
 import { User } from './entities/user.entity';
 import { Tenant } from './entities/tenant.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
-import { PolicyGuard } from './guards/policy.guard';
 import { TenantContextMiddleware } from './middleware/tenant-context.middleware';
+import { PolicyGuard } from './guards/policy.guard';
 import { VerticalPolicyService } from '../core/verticals/vertical-policy.service';
 import { CoreModule } from '../core/core.module';
+import { TenantProvisioningService } from './tenant-provisioning.service';
+import { TenantProvisioningController } from './tenant-provisioning.controller';
+import { TenantSetting } from '../tenant/entities/tenant-setting.entity';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
-    CacheModule.register(),
-    TypeOrmModule.forFeature([User, Tenant]),
+    TypeOrmModule.forFeature([User, Tenant, TenantSetting]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -29,14 +31,10 @@ import { CoreModule } from '../core/core.module';
       inject: [ConfigService],
     }),
     CoreModule,
+    AuditModule,
   ],
-  controllers: [IamController],
-  providers: [
-    IamService,
-    JwtStrategy,
-    LocalStrategy,
-    PolicyGuard,
-  ],
+  controllers: [IamController, TenantProvisioningController],
+  providers: [IamService, JwtStrategy, LocalStrategy, PolicyGuard, TenantProvisioningService],
 })
 export class IamModule {
   configure(consumer: any) {

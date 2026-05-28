@@ -2,6 +2,13 @@
 
 > **Single source of truth** for all engineering, architectural, and product decisions across the Meru ecosystem.
 > Every PR, agent action, and new vertical MUST comply with this document.
+>
+> **Detailed specifications** are in the `docs/` directory:
+> - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Definitive system architecture & design
+> - [PRD.md](docs/PRD.md) — Product requirements for all stakeholders
+> - [TRD.md](docs/TRD.md) — Detailed technical specifications for implementation
+> - [STRATEGY.md](docs/STRATEGY.md) — Business strategy, GTM, pricing & roadmap
+> - [DEVELOPMENT_STRATEGY.md](docs/DEVELOPMENT_STRATEGY.md) — Full-stack development guidelines & integration strategy
 
 ---
 
@@ -260,7 +267,11 @@ meru/
 │   └── github-actions/
 │
 └── docs/
-    ├── CLAUDE.md               # ← this document
+    ├── CLAUDE.md               # ← this document (vision, rules, agent instructions)
+    ├── ARCHITECTURE.md         # System architecture & design
+    ├── PRD.md                  # Product requirements
+    ├── TRD.md                  # Technical specifications
+    ├── STRATEGY.md             # Business & execution strategy
     ├── ADR/                    # Architectural Decision Records
     └── runbooks/
 ```
@@ -315,13 +326,14 @@ By mastering the **Common Corridor** (UAE, KSA, UK, Canada, Australia), Meru ach
 When working in this repo:
 
 1. **Read this `CLAUDE.md` first.** Always. Before any file edit.
-2. **80/20 rule:** if you're tempted to add vertical-specific code into `packages/core-api/`, **STOP** — it belongs in a JSON pack or a vertical app.
-3. **Schema first:** any new entity → start with Drizzle schema + RLS policy + Zod type, then build outward.
-4. **Citations or silence:** AI features without citation enforcement do not ship.
-5. **One concern per PR:** never mix a core-module change with a vertical-pack change.
-6. **Update the relevant ADR** in `docs/ADR/` for any architectural decision.
+2. **Consult the detailed docs** for specifics: [ARCHITECTURE.md](docs/ARCHITECTURE.md) for system design, [PRD.md](docs/PRD.md) for product scope, [TRD.md](docs/TRD.md) for technical specs, [STRATEGY.md](docs/STRATEGY.md) for business context.
+3. **80/20 rule:** if you're tempted to add vertical-specific code into `packages/core-api/`, **STOP** — it belongs in a JSON pack or a vertical app.
+4. **Schema first:** any new entity → start with Drizzle schema + RLS policy + Zod type, then build outward.
+5. **Citations or silence:** AI features without citation enforcement do not ship.
+6. **One concern per PR:** never mix a core-module change with a vertical-pack change.
+7. **Update the relevant ADR** in `docs/ADR/` for any architectural decision.
 
 ---
 
-*Last updated: 2026-05-26*
+*Last updated: 2026-05-28*
 *Document owner: Meru Platform Team*

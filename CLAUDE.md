@@ -9,6 +9,8 @@
 > - [TRD.md](docs/TRD.md) — Detailed technical specifications for implementation
 > - [STRATEGY.md](docs/STRATEGY.md) — Business strategy, GTM, pricing & roadmap
 > - [DEVELOPMENT_STRATEGY.md](docs/DEVELOPMENT_STRATEGY.md) — Full-stack development guidelines & integration strategy
+> - [DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md) — Complete database design, 47 tables, RLS policies
+> - [DESIGN_GUIDELINES.md](docs/DESIGN_GUIDELINES.md) — Brand system, component library, layout patterns
 
 ---
 

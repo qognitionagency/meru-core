@@ -40,7 +40,27 @@ export interface MailMessage {
  * up differing by a path segment nobody notices until onboarding fails.
  */
 export function inviteUrlFor(appUrl: string, token: string): string {
-  return `${appUrl}/accept-invite?token=${encodeURIComponent(token)}`;
+  // `/reset-password`, NOT `/accept-invite`.
+  //
+  // `/accept-invite` was never built. Every invitation this product has ever
+  // sent linked to it, and the app 307s it to `/login?from=/accept-invite` —
+  // so an invited user landed on a sign-in form for an account whose password
+  // they had come to set. Verified against production on 2026-09-10 while
+  // running the acceptance script: no route directory, no reference anywhere
+  // in the app, and no backend endpoint redeeming an INVITE token either.
+  //
+  // The route that does the job already exists and was written for exactly
+  // this. `app/(auth)/reset-password/page.tsx`'s own header: "the same route
+  // and the same POST /auth/reset-password { token, password } … single-use
+  // and expires (60 minutes for a reset, 7 days for an invite)". The backend
+  // agrees — `resetPassword` looks a token up by hash with no type filter, so
+  // an INVITE token redeems there. The page was built for invitations; the
+  // link pointed somewhere else.
+  //
+  // This is the second time invitation mail has pointed at a route that does
+  // not exist — `/signup` was the first, corrected days ago. Both were found
+  // by clicking the link rather than by reading the code.
+  return `${appUrl}/reset-password?token=${encodeURIComponent(token)}`;
 }
 
 @Injectable()

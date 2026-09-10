@@ -16,18 +16,26 @@ import { inviteUrlFor } from '../core/mail/mail.service';
  */
 describe('invite URL builder', () => {
   it('points at the route the app actually serves', () => {
-    // `/accept-invite`, not `/signup` — a sibling defect shipped once already,
-    // where invitation mail linked to a route that does not exist.
+    // Twice now, invitation mail has linked to a route nobody built: first
+    // `/signup`, then `/accept-invite`. `/reset-password` is the one that
+    // exists AND redeems an INVITE token — its own page header says it serves
+    // both flows. Assert the destination, not just the shape.
     expect(inviteUrlFor('https://app.immistack.com', 'abc')).toBe(
-      'https://app.immistack.com/accept-invite?token=abc',
+      'https://app.immistack.com/reset-password?token=abc',
     );
+  });
+
+  it('does not point at either route that was never built', () => {
+    const url = inviteUrlFor('https://app.immistack.com', 'abc');
+    expect(url).not.toContain('/accept-invite');
+    expect(url).not.toContain('/signup');
   });
 
   it('encodes the token', () => {
     // Tokens are base64url today, but a raw `+` or `/` reaching a query string
     // unencoded silently decodes to something else and the invite 404s.
     expect(inviteUrlFor('https://x.test', 'a+b/c=')).toBe(
-      'https://x.test/accept-invite?token=a%2Bb%2Fc%3D',
+      'https://x.test/reset-password?token=a%2Bb%2Fc%3D',
     );
   });
 

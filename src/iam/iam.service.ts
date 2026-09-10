@@ -777,7 +777,9 @@ export class IamService {
     },
     invitedBy: { id: string; name: string } | undefined,
     actorRoles: string[],
-  ): Promise<DirectoryUser & { inviteSent: boolean }> {
+  ): Promise<
+    DirectoryUser & { inviteSent: boolean; inviteUrl: string }
+  > {
     const requestedRole = dto.role ?? PlatformRole.STAFF;
     // FR-1.2 — both halves or neither, refused here as a 400 rather than left
     // to the database CHECK constraint to turn into a 500. A number with no
@@ -859,7 +861,18 @@ export class IamService {
       `Invited ${dto.email} to tenant ${tenantId} (email delivered: ${delivered})`,
     );
 
-    return { ...this.toDirectoryUser(user), inviteSent: delivered };
+    // `inviteUrl` travels with the result for the same reason `resendInvite`
+    // returns it: when mail fails there is otherwise NO way to complete
+    // onboarding — the token is stored SHA-256-only, so it cannot be recovered
+    // from the database, and `resendInvite` is scoped to the caller's own
+    // tenant, which the operator provisioning a NEW tenant is not a member of.
+    // Observed on production 2026-09-10: a tenant was created that nobody
+    // could ever sign into.
+    return {
+      ...this.toDirectoryUser(user),
+      inviteSent: delivered,
+      inviteUrl: inviteUrlFor(this.mailService.appUrl, token),
+    };
   }
 
   /**

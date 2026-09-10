@@ -648,10 +648,19 @@ export class TenantProvisioningService {
     inviteUser: (
       tenantId: string,
       invite: { email: string; role: string; firstName?: string; lastName?: string },
-    ) => Promise<{ inviteSent: boolean }>,
+    ) => Promise<{ inviteSent: boolean; inviteUrl?: string }>,
   ): Promise<{
     tenant: Pick<Tenant, 'id' | 'slug' | 'name' | 'vertical' | 'plan' | 'status'>;
     inviteSent: boolean;
+    /**
+     * The admin's accept-invite link, returned to the provisioning operator.
+     *
+     * Without it a failed send leaves a tenant nobody can enter: the token is
+     * hashed in `auth_tokens`, and `POST /iam/users/:id/resend-invite` reads
+     * `req.user.tenantId`, so the operator — who is not a member of the tenant
+     * they just created — cannot reach it. This is the only route back.
+     */
+    inviteUrl?: string;
     connectorsEnabled: string[];
   }> {
     const plan = dto.plan ?? TenantPlan.FREE;
@@ -723,6 +732,7 @@ export class TenantProvisioningService {
         status: tenant.status,
       },
       inviteSent: invite.inviteSent,
+      inviteUrl: invite.inviteUrl,
       connectorsEnabled: dto.connectors ?? [],
     };
   }

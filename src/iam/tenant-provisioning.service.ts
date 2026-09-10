@@ -17,13 +17,18 @@ import {
 } from './entities/tenant.entity';
 import { User } from './entities/user.entity';
 import { TenantSetting } from '../tenant/entities/tenant-setting.entity';
-import { randomUUID } from 'node:crypto';
+import { TenantSignupInvite } from './entities/tenant-signup-invite.entity';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { TenantContext } from '../core/tenancy/tenant-context';
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import { MintTenantSignupInviteDto } from './dto/mint-tenant-signup-invite.dto';
 import { ModuleCode } from './entitlements/module-code';
 import { PlatformRole } from './enums/platform-role.enum';
 import { MailService } from '../core/mail/mail.service';
+import { resolveMailBrand } from '../core/mail/mail-brand';
 import { MeruErrorCode } from '../common/types';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction, AuditSeverity } from '../audit/entities/audit-log.entity';
 import {
   ConnectorMode,
   TenantConnector,
@@ -118,6 +123,8 @@ const PLAN_MODULES: Record<TenantPlan, string[]> = {
 @Injectable()
 export class TenantProvisioningService {
   private readonly logger = new Logger(TenantProvisioningService.name);
+  /** DEF-1: how long a signup invite stays redeemable. */
+  private readonly SIGNUP_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
   constructor(
     @InjectRepository(Tenant)
@@ -126,10 +133,92 @@ export class TenantProvisioningService {
     private userRepo: Repository<User>,
     @InjectRepository(TenantSetting)
     private tenantSettingRepo: Repository<TenantSetting>,
+    @InjectRepository(TenantSignupInvite)
+    private tenantSignupInviteRepo: Repository<TenantSignupInvite>,
     private dataSource: DataSource,
     private configService: ConfigService,
     private mailService: MailService,
+    private auditService: AuditService,
   ) {}
+
+  private hashInviteToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  /**
+   * Mint a signup invite (DEF-1). `platform_admin` only, called from
+   * `TenancyService.runAsGod` so minting is audited before it runs
+   * (CLAUDE.md §6.4) — the invite row itself only ever exists on a bypassed
+   * connection (see the migration's RLS comment), so this must run inside
+   * that same bypass or the insert would be silently filtered by RLS's
+   * `WITH CHECK`.
+   *
+   * **The raw token is returned to the authenticated `platform_admin` caller**
+   * as well as emailed, and is never persisted — only its SHA-256, matching
+   * `AuthToken`.
+   *
+   * Returning it is deliberate, not a leak. Without it the token exists in
+   * exactly one place — the body of an email nobody in this system can read
+   * back — so a message that is slow, filtered or misrouted leaves the
+   * operator with no recovery path at all and the recipient permanently
+   * unable to onboard. That is ADR 0006's "copy invite link" in substance.
+   * The caller is already `platform_admin`, already through `runAsGod`, and
+   * already has a CRITICAL audit entry written before this runs; the response
+   * travels over TLS to a party who could simply mint another one. `delivered`
+   * is reported alongside so the operator knows whether they need the fallback
+   * rather than having to guess (the same "say what actually happened"
+   * reporting `IamService.inviteUser` does).
+   */
+  async mintSignupInvite(
+    dto: MintTenantSignupInviteDto,
+    issuedBy: string,
+  ): Promise<{
+    email: string;
+    expiresAt: Date;
+    token: string;
+    inviteUrl: string;
+    delivered: boolean;
+  }> {
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + this.SIGNUP_INVITE_TTL_MS);
+    const email = dto.email.trim();
+
+    const invite = this.tenantSignupInviteRepo.create({
+      email,
+      tokenHash: this.hashInviteToken(token),
+      allowedSlug: dto.allowedSlug ?? null,
+      allowedVertical: dto.allowedVertical ?? null,
+      allowedPlan: dto.allowedPlan ?? null,
+      expiresAt,
+      usedAt: null,
+      issuedBy,
+    });
+    await this.tenantSignupInviteRepo.save(invite);
+
+    const { delivered } = await this.mailService.sendTenantSignupInvite({
+      to: email,
+      token,
+      expiresAt,
+    });
+    if (!delivered) {
+      this.logger.warn(`Signup invite for ${email} minted but not delivered`);
+    }
+
+    this.logger.log(
+      `Signup invite minted for ${email} by ${issuedBy} (email delivered: ${delivered})`,
+    );
+
+    // Built from the same helper the email uses, so the operator's copied link
+    // and the emailed one can never drift apart — two independently-assembled
+    // URLs is how one of them ends up pointing at a route that does not exist.
+    return {
+      email,
+      expiresAt,
+      token,
+      inviteUrl: this.mailService.signupInviteUrl(token),
+      delivered,
+    };
+  }
 
   async createTenant(dto: CreateTenantDto): Promise<TenantWorkspaceResponse> {
     // Signup is the one operation that *creates* the tenant it would otherwise
@@ -154,27 +243,103 @@ export class TenantProvisioningService {
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
+    // One message for missing/expired/used/mismatched, matching
+    // `IamService.resetPassword`'s anti-enumeration posture — distinguishing
+    // them would tell a caller probing tokens which guesses were once real.
+    const inviteInvalid = () =>
+      new HttpException(
+        {
+          code: MeruErrorCode.TENANT_SIGNUP_INVITE_INVALID,
+          message: 'This signup invite is invalid or has expired.',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+
     try {
+      // 0. Redeem the invite (DEF-1) — atomically, inside this transaction.
+      //
+      // `UPDATE ... WHERE "usedAt" IS NULL ... RETURNING *`, not a read then a
+      // separate write: two concurrent redemptions of the same token must not
+      // both see it as live. Postgres row-level locking on the UPDATE means at
+      // most one of them affects a row; the other gets nothing back and is
+      // refused. Burning the token here, before any validation of its
+      // contents, is deliberate too — every check below throws on failure,
+      // which rolls back this whole transaction (the burn included), so a
+      // rejected redemption never leaves the token half-spent.
+      const tokenHash = this.hashInviteToken(dto.token);
+      const now = new Date();
+      const redeemed = await queryRunner.manager
+        .createQueryBuilder()
+        .update(TenantSignupInvite)
+        .set({ usedAt: now })
+        .where('"tokenHash" = :tokenHash', { tokenHash })
+        .andWhere('"usedAt" IS NULL')
+        .andWhere('"expiresAt" > :now', { now })
+        .returning('*')
+        .execute();
+
+      const redeemedRows = redeemed.raw as unknown[];
+      const invite = redeemedRows[0] as TenantSignupInvite | undefined;
+      if (!invite) {
+        throw inviteInvalid();
+      }
+
+      // Bound to the invited address server-side — never trust the client's
+      // say-so on which invite a request is redeeming.
+      const normalise = (email: string) => email.trim().toLowerCase();
+      if (normalise(invite.email) !== normalise(dto.email)) {
+        throw inviteInvalid();
+      }
+
+      const requestedPlan = dto.plan || TenantPlan.FREE;
+      if (invite.allowedSlug && invite.allowedSlug !== dto.slug) {
+        throw inviteInvalid();
+      }
+      // Compared as strings: `allowedVertical`/`allowedPlan` are stored as
+      // plain text (see the entity comment on why), not the enum type, so
+      // this is a real cross-type comparison, not an accidental one.
+      if (
+        invite.allowedVertical &&
+        invite.allowedVertical !== (dto.vertical as string)
+      ) {
+        throw inviteInvalid();
+      }
+      if (
+        invite.allowedPlan &&
+        invite.allowedPlan !== (requestedPlan as string)
+      ) {
+        throw inviteInvalid();
+      }
+
+      // Where the issuer pinned a value, it is authoritative — the checks
+      // above only prove the client did not disagree with it.
+      const effectiveSlug = invite.allowedSlug ?? dto.slug;
+      const effectiveVertical =
+        (invite.allowedVertical as VerticalType | null) ?? dto.vertical;
+      const effectivePlan =
+        (invite.allowedPlan as TenantPlan | null) ?? requestedPlan;
+
       // 1. Validate slug uniqueness
       const existingTenant = await queryRunner.manager.findOne(Tenant, {
-        where: { slug: dto.slug },
+        where: { slug: effectiveSlug },
       });
 
       if (existingTenant) {
-        throw new BadRequestException(`Slug ${dto.slug} is already taken`);
+        throw new BadRequestException(`Slug ${effectiveSlug} is already taken`);
       }
 
       // 2. Create tenant (workspace)
       const tenant = queryRunner.manager.create(Tenant, {
         id: randomUUID(),
         name: dto.name,
-        slug: dto.slug,
-        vertical: dto.vertical,
+        slug: effectiveSlug,
+        vertical: effectiveVertical,
         status: TenantStatus.TRIAL,
-        plan: dto.plan || TenantPlan.FREE,
-        settings: this.getDefaultSettings(dto.plan || TenantPlan.FREE),
+        plan: effectivePlan,
+        settings: this.getDefaultSettings(effectivePlan),
         metadata: {
           source: 'signup',
+          signupInviteId: invite.id,
         },
         trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days trial
         createdAt: new Date(),
@@ -250,6 +415,36 @@ export class TenantProvisioningService {
 
       this.logger.log(`Tenant workspace created successfully: ${tenant.slug}`);
 
+      // 5. Audit the redemption. `createTenant` runs the rest of this method
+      // under `TenantContext.runAsSystem`, which is documented as unaudited —
+      // there is no session at signup, so nothing else records that this
+      // tenant came into existence. Attributed to the invite's `issuedBy`,
+      // not to any caller-supplied identity: the redeeming request has no
+      // authenticated actor, but the platform_admin who minted the invite is
+      // exactly who authorised this tenant to exist, so that is the correct
+      // "who" for this row. Best-effort: the tenant is already committed by
+      // this point, so a failure here is logged rather than unwound — there
+      // is nothing left to roll back.
+      try {
+        await this.auditService.logEvent({
+          tenantId: tenant.id,
+          userId: invite.issuedBy,
+          action: AuditAction.CREATE,
+          entityType: 'tenant',
+          entityId: tenant.id,
+          description: `Tenant '${tenant.slug}' created via signup invite ${invite.id} (DEF-1)`,
+          severity: AuditSeverity.INFO,
+          context: {
+            signupInviteId: invite.id,
+            redeemedAt: now.toISOString(),
+          },
+        });
+      } catch (auditError) {
+        this.logger.error(
+          `Failed to write signup-invite redemption audit entry for tenant ${tenant.id}: ${auditError.message}`,
+        );
+      }
+
       // 6. Send welcome email (async, outside transaction)
       // Reported, not assumed. This was hardcoded `true`, so a workspace
       // whose welcome email never left the building still told the caller it
@@ -260,6 +455,9 @@ export class TenantProvisioningService {
         firstName: user.firstName,
         tenantName: tenant.name,
         tenantSlug: tenant.slug,
+        // The tenant created moments ago in this transaction — the recipient's
+        // own firm, and the only tenant in scope here.
+        brand: resolveMailBrand(tenant),
         plan: tenant.plan,
         trialEndsAt: tenant.trialEndsAt,
       });

@@ -32,6 +32,7 @@ import {
 } from './enums/platform-role.enum';
 import type { Actor } from '../common/access';
 import { MailService } from '../core/mail/mail.service';
+import { resolveMailBrand } from '../core/mail/mail-brand';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 // otplib is pinned to v12 deliberately. v13 pulls in @scure/base and
@@ -55,6 +56,40 @@ export interface SessionContext {
   userAgent?: string;
   /** Which product opened it: `immistack`, `meru-dashboard`, `governancex`. */
   client?: string;
+}
+
+/**
+ * FR-1.2 — the practitioner credential is a PAIR: a number and the register it
+ * is on. This is the one place that decides what a partial pair means.
+ *
+ * Both present → stored, trimmed. Both absent (or blank) → cleared to null.
+ * One without the other → 400, because neither half means anything alone: a
+ * bare "1234567" is unattributable, and a bare "marn" would render on a
+ * practitioner register as though someone held a credential whose number
+ * nobody recorded — unknown presented as settled (CLAUDE.md §5.2).
+ *
+ * The database CHECK constraint
+ * (`CHK_users_practitioner_credential_paired`) enforces the same rule for any
+ * writer that never reaches this function; this turns it into a 400 with a
+ * usable message rather than a 500 on a constraint violation.
+ */
+function normalisePractitionerCredential(input: {
+  practitionerCredential?: string | null;
+  practitionerCredentialType?: string | null;
+}): { number: string | null; type: string | null } {
+  const number = input.practitionerCredential?.trim() || null;
+  const type = input.practitionerCredentialType?.trim().toLowerCase() || null;
+
+  if (number === null && type === null) return { number: null, type: null };
+  if (number === null || type === null) {
+    throw new BadRequestException(
+      'A practitioner credential needs both a number ' +
+        '(`practitionerCredential`) and the register it is on ' +
+        '(`practitionerCredentialType`, e.g. `marn`). Send both, or send ' +
+        'neither to clear it.',
+    );
+  }
+  return { number, type };
 }
 
 @Injectable()
@@ -737,11 +772,19 @@ export class IamService {
       firstName?: string;
       lastName?: string;
       department?: string;
+      practitionerCredential?: string;
+      practitionerCredentialType?: string;
     },
     invitedBy: { id: string; name: string } | undefined,
     actorRoles: string[],
   ): Promise<DirectoryUser & { inviteSent: boolean }> {
     const requestedRole = dto.role ?? PlatformRole.STAFF;
+    // FR-1.2 — both halves or neither, refused here as a 400 rather than left
+    // to the database CHECK constraint to turn into a 500. A number with no
+    // register is unattributable; a register with no number is a half-filled
+    // form that would read on a practitioner list as if someone were
+    // credentialed.
+    const credential = normalisePractitionerCredential(dto);
     if (!canGrantRole(actorRoles, requestedRole)) {
       throw new ForbiddenException(
         `Cannot invite a user as '${requestedRole}': outranks the caller`,
@@ -778,6 +821,8 @@ export class IamService {
       provider: AuthProvider.LOCAL,
       roles: [requestedRole],
       attributes: dto.department ? { department: dto.department } : {},
+      practitionerCredential: credential.number,
+      practitionerCredentialType: credential.type,
     });
 
     await this.userRepo.save(user);
@@ -798,6 +843,11 @@ export class IamService {
       to: user.email,
       inviterName: invitedBy?.name ?? 'A colleague',
       tenantName: tenant?.name ?? 'your workspace',
+      // The invitee's own tenant — the row loaded by `tenantId` immediately
+      // above, which came from the caller's JWT, never from the request body.
+      // The firm is who this invitation is from; Meru is not a name the
+      // recipient has ever seen.
+      brand: resolveMailBrand(tenant),
       token,
       expiresAt,
     });
@@ -853,6 +903,11 @@ export class IamService {
       to: user.email,
       inviterName: invitedBy?.name ?? 'A colleague',
       tenantName: tenant?.name ?? 'your workspace',
+      // The invitee's own tenant — the row loaded by `tenantId` immediately
+      // above, which came from the caller's JWT, never from the request body.
+      // The firm is who this invitation is from; Meru is not a name the
+      // recipient has ever seen.
+      brand: resolveMailBrand(tenant),
       token,
       expiresAt,
     });
@@ -904,6 +959,8 @@ export class IamService {
       role?: string;
       department?: string;
       status?: UserStatus;
+      practitionerCredential?: string;
+      practitionerCredentialType?: string;
     },
     actor: Actor,
   ): Promise<DirectoryUser> {
@@ -925,6 +982,19 @@ export class IamService {
       (updates.role !== undefined || updates.status !== undefined)
     ) {
       throw new ForbiddenException('You cannot change your own role or status');
+    }
+
+    // FR-1.2. Same ceiling as `role`/`status`, and for the same reason: a
+    // credential is what a sign-off gate will check, so a user who could edit
+    // their own could self-authorise advice or lodgement. Only an admin may
+    // write a firm's practitioner register.
+    const credentialRequested =
+      updates.practitionerCredential !== undefined ||
+      updates.practitionerCredentialType !== undefined;
+    if (!isAdmin && credentialRequested) {
+      throw new ForbiddenException(
+        'You cannot change your own practitioner credential',
+      );
     }
 
     const user = await this.userRepo.findOne({
@@ -960,6 +1030,22 @@ export class IamService {
     if (updates.department !== undefined) {
       user.attributes = { ...user.attributes, department: updates.department };
     }
+    if (credentialRequested) {
+      // Written as a pair, always. Clearing one clears both — a firm removing
+      // someone from its register removes the whole credential, never leaving
+      // an orphaned registry name that reads as "credentialed, number
+      // missing".
+      const credential = normalisePractitionerCredential({
+        practitionerCredential:
+          updates.practitionerCredential ?? user.practitionerCredential ?? '',
+        practitionerCredentialType:
+          updates.practitionerCredentialType ??
+          user.practitionerCredentialType ??
+          '',
+      });
+      user.practitionerCredential = credential.number;
+      user.practitionerCredentialType = credential.type;
+    }
 
     await this.userRepo.save(user);
     return this.toDirectoryUser(user);
@@ -979,6 +1065,15 @@ export class IamService {
       role: this.resolvePrimaryRole(roles),
       roles,
       department: (user.attributes?.department as string) ?? null,
+      // FR-1.2. Returned as the pair it is stored as, plus an explicit
+      // `practitionerCredentialVerified: false` — the value is self-asserted
+      // and no register has been consulted (CLAUDE.md §13: every regulator
+      // adapter is sandbox). Sending the flag rather than omitting it is the
+      // point: a UI that has to read `false` cannot accidentally render a tick,
+      // whereas an absent field invites one (§5.2).
+      practitionerCredential: user.practitionerCredential ?? null,
+      practitionerCredentialType: user.practitionerCredentialType ?? null,
+      practitionerCredentialVerified: false,
       status: user.status,
       lastActiveAt: user.lastLoginAt ?? null,
       createdAt: user.createdAt,
@@ -1108,9 +1203,23 @@ export class IamService {
         ),
     );
 
+    // The brand belongs to the account holder's own tenant, and this route is
+    // public: there is no ambient tenant on the connection, so the lookup runs
+    // in the same system context as the user lookup above and is filtered to
+    // `user.tenantId` — the tenant of the row that matched the address, never
+    // anything the caller supplied. A user with no tenant resolves unbranded
+    // rather than to a house name.
+    const tenant = user.tenantId
+      ? await TenantContext.runAsSystem(
+          'resolve tenant brand for password reset',
+          () => this.tenantRepo.findOne({ where: { id: user.tenantId } }),
+        )
+      : null;
+
     await this.mailService.sendPasswordReset({
       to: user.email,
       firstName: user.firstName,
+      brand: resolveMailBrand(tenant),
       token,
       expiresAt,
     });

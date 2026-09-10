@@ -196,10 +196,32 @@ export class CrmController {
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({
     summary: 'Create a new CRM entity',
-    description: 'Staff only — a client cannot open a case on themselves.',
+    description:
+      'Staff only — a client cannot open a case on themselves.\n\n' +
+      'The response carries a server-assigned `recordNumber` (ADR 0010): ' +
+      '`CL-000001` for a `person`/`organization`, `CS-000001` for a `case`, ' +
+      'unique per tenant and never reused. It is **null** for every other ' +
+      'type, including `lead` — a lead is given a number only when it ' +
+      'converts, via `POST /crm/entities/:id/convert`. `recordNumber` is not ' +
+      'accepted in the request body; sending it is a 400.',
   })
   @ApiBody({ type: CreateEntityDto })
-  @ApiResponse({ status: 201, description: 'Entity created successfully' })
+  @ApiResponse({
+    status: 201,
+    description: 'Entity created successfully',
+    schema: {
+      example: {
+        data: {
+          id: '6f1c...',
+          type: 'person',
+          recordNumber: 'CL-000001',
+          firstName: 'Layla',
+          lastName: 'Rashid',
+          status: null,
+        },
+      },
+    },
+  })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Requires a staff role' })
   createEntity(@Request() req: ExpressRequest, @Body() dto: CreateEntityDto) {
@@ -412,7 +434,15 @@ export class CrmController {
       'Permitted transitions are constrained — `lead` → `person`/`organization`, ' +
       'and `person` ↔ `organization`. Anything else is a 400 naming what is ' +
       'allowed. The previous type is recorded under ' +
-      '`verticalAttributes.conversion`.',
+      '`verticalAttributes.conversion`.\n\n' +
+      '`lead` → `person`/`organization` is the one transition that ASSIGNS a ' +
+      '`recordNumber` (ADR 0010): a lead has none, and the moment it becomes ' +
+      'a client it gets one. A record that already has a number keeps it — ' +
+      '`person` → `organization` → `person` never claims a second.\n\n' +
+      'This route does **not** promote a name out of `verticalAttributes`. ' +
+      'Core cannot know where a vertical stored one, so `firstName`/' +
+      '`lastName` pass through exactly as they were (ADR 0011 §2.2); the ' +
+      'producer that created the lead is responsible for populating them.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiResponse({ status: 200, description: 'Entity converted' })

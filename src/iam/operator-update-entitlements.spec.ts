@@ -30,9 +30,11 @@ describe('TenantProvisioningService.updateEntitlementsAsOperator', () => {
       tenantRepo as never,
       undefined as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       dataSource as never,
       undefined as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   const freeTenant = {
@@ -122,9 +124,11 @@ describe('TenantProvisioningService.getPlanAllowance', () => {
       tenantRepo as never,
       undefined as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       undefined as never,
       undefined as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   beforeEach(() => findOne.mockReset());

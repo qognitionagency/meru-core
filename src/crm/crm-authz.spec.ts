@@ -34,6 +34,34 @@ import { Actor } from '../common/access';
  * the real Nest module graph; see `scripts/smoke/cross-tenant.sh`'s
  * intra-tenant section for the equivalent at the HTTP boundary.
  */
+/**
+ * A `DataSource` that runs `CrmService`'s transaction inline against the same
+ * in-memory repository stub the rest of the harness uses (ADR 0010 §2.2 gave
+ * `createEntity`/`convertEntity` a `QueryRunner`).
+ *
+ * The counter returns a monotonic value, so the numbers a test sees are the
+ * numbers the real upsert would issue. `rollbackTransaction` is recorded but
+ * does not unwind the stub — no test here asserts on rollback; the dedicated
+ * numbering spec does.
+ */
+function fakeDataSource(repo: { save: (e: any) => any }) {
+  let counter = 0;
+  return {
+    createQueryRunner: () => ({
+      connect: async () => undefined,
+      startTransaction: async () => undefined,
+      commitTransaction: async () => undefined,
+      rollbackTransaction: async () => undefined,
+      release: async () => undefined,
+      query: async () => [{ value: String(++counter) }],
+      manager: {
+        create: (_target: unknown, data: any) => ({ ...data }),
+        save: async (a: any, b?: any) => repo.save(b ?? a),
+      },
+    }),
+  };
+}
+
 describe('CRM authorisation matrix', () => {
   const T = 't1';
   const OWNED_ID = 'e-owned';
@@ -197,6 +225,9 @@ describe('CRM authorisation matrix', () => {
       {} as any,
       relations,
       access,
+      {} as any,
+      {} as any,
+      fakeDataSource(entityRepo) as any,
     );
     const comments = new CommentService(entityRepo as any, access);
     const acceptance = new AcceptanceService(

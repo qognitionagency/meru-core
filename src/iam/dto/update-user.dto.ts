@@ -51,4 +51,34 @@ export class UpdateUserDto {
   @IsOptional()
   @IsEnum(UserStatus)
   status?: UserStatus;
+
+  // FR-1.2. Admin-only, unlike `firstName`/`lastName`: a user who could edit
+  // their own credential could grant themselves whatever a sign-off gate ends
+  // up checking. `IamService.updateUser` enforces that, not this DTO — the DTO
+  // cannot see who the caller is (same reason as `role`/`status` above).
+  //
+  // Send an empty string for either to clear BOTH — a firm removing a
+  // practitioner from its register clears the whole credential, never half of
+  // it.
+
+  @ApiPropertyOptional({
+    example: '1234567',
+    description:
+      'Registration number. **Recorded, not verified.** Admin-only. Send an ' +
+      'empty string to clear the credential.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  practitionerCredential?: string;
+
+  @ApiPropertyOptional({
+    example: 'marn',
+    description:
+      'Which register the number is on — `marn`, `oisc`, `rcic`. Admin-only.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  practitionerCredentialType?: string;
 }

@@ -13,11 +13,11 @@ import { Session } from './entities/session.entity';
 import { ApiKey } from './entities/api-key.entity';
 import { AuthToken } from './entities/auth-token.entity';
 import { TenantConfigPin } from './entities/tenant-config-pin.entity';
+import { TenantSignupInvite } from './entities/tenant-signup-invite.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
 import { TenantContextMiddleware } from './middleware/tenant-context.middleware';
 import { PolicyGuard } from './guards/policy.guard';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { VerticalPolicyService } from '../core/verticals/vertical-policy.service';
 import { CoreModule } from '../core/core.module';
 import { TenantProvisioningService } from './tenant-provisioning.service';
@@ -38,6 +38,7 @@ import { SamlService } from './services/saml.service';
       ApiKey,
       AuthToken,
       TenantConfigPin,
+      TenantSignupInvite,
       TenantSetting,
     ]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
@@ -68,7 +69,6 @@ import { SamlService } from './services/saml.service';
     JwtStrategy,
     LocalStrategy,
     PolicyGuard,
-    JwtAuthGuard,
     TenantProvisioningService,
     SamlService,
   ],
@@ -76,7 +76,6 @@ import { SamlService } from './services/saml.service';
     IamService,
     TenantProvisioningService,
     PolicyGuard,
-    JwtAuthGuard,
     JwtStrategy,
     SamlService,
     JwtModule,

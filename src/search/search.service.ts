@@ -105,10 +105,24 @@ export class SearchService {
       // indexed every task, form submission and workflow instance under the
       // title "Unknown" with an empty snippet — indexed, but unfindable by
       // anything a person would actually type.
+      // ADR 0011 §2.4 — an ordered fallback chain, never a single static
+      // string. `'Unknown'` as a result title is the same failure as "Unnamed
+      // client" on the client list (CLAUDE.md §5.2, "unknown is never clear");
+      // it has gone unnoticed longer only because it sits inside a result list
+      // rather than a primary screen.
+      //
+      // `recordNumber` (ADR 0010) sits second, above email, because it is the
+      // chain's real floor: server-assigned, guaranteed present on every
+      // eligible record, never invented, and visually unmistakable for a name.
+      // `'Unknown'` survives as the last resort for a record that has none of
+      // the five — a pre-backfill row, or a type that draws from no series —
+      // and it is honest there: at that point the title genuinely is unknown.
       title:
         entity.title ??
         (`${entity.firstName || ''} ${entity.lastName || ''}`.trim() ||
+          entity.recordNumber ||
           entity.email ||
+          entity.phoneNumber ||
           'Unknown'),
       content:
         typeof entity.content === 'string'
@@ -364,6 +378,10 @@ export class SearchService {
     if (entity.lastName) parts.push(entity.lastName);
     if (entity.email) parts.push(entity.email);
     if (entity.phoneNumber) parts.push(entity.phoneNumber);
+    // ADR 0010 open item 7 — so a caseworker can type `CS-000042` straight
+    // into search and land on the case, which is how a number cross-checked
+    // against a paper file is actually used.
+    if (entity.recordNumber) parts.push(entity.recordNumber);
 
     const attr = entity.verticalAttributes || {};
     Object.values(attr).forEach((val: any) => {

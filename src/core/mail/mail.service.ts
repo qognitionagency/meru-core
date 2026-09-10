@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
+import { MailBrand, UNBRANDED_MAIL, withDisplayName } from './mail-brand';
 
 export interface MailMessage {
   to: string;
@@ -8,6 +9,12 @@ export interface MailMessage {
   /** Plain-text body. Always required — never ship HTML-only mail. */
   text: string;
   html?: string;
+  /**
+   * Overrides the display name on `RESEND_FROM` for this message only — the
+   * address is never changed (see `withDisplayName`). Absent means the
+   * configured sender goes out as-is.
+   */
+  from?: string;
 }
 
 /**
@@ -40,7 +47,21 @@ export class MailService {
     // fine for a first smoke test, useless in production, hence the warning.
     this.from =
       config.get<string>('RESEND_FROM') ?? 'Meru <onboarding@resend.dev>';
-    this.appUrl = config.get<string>('APP_URL') ?? 'https://app.meru.com';
+    // `app.meru.com` used to be the fallback. It is **NXDOMAIN** — the
+    // workspace `CLAUDE.md` §4 domain table records that it does not resolve
+    // and the dashboard has no public hostname today. Every link in every
+    // email this service sends is one a customer clicks, so a fallback that
+    // cannot resolve turns an unset variable into a dead link rather than a
+    // loud failure. `app.immistack.com` is the one product hostname that is
+    // verified live and serving the app the invite flow actually lives in.
+    this.appUrl = config.get<string>('APP_URL') ?? 'https://app.immistack.com';
+
+    if (!config.get<string>('APP_URL')) {
+      this.logger.warn(
+        `APP_URL is unset — every emailed link will point at ${this.appUrl}. ` +
+          'Set it explicitly per environment rather than relying on this.',
+      );
+    }
 
     if (apiKey) {
       this.resend = new Resend(apiKey);
@@ -84,7 +105,7 @@ export class MailService {
 
     try {
       const { data, error } = await this.resend.emails.send({
-        from: this.from,
+        from: message.from ?? this.from,
         to: message.to,
         subject: message.subject,
         text: message.text,
@@ -125,16 +146,46 @@ export class MailService {
       .replace(/"/g, '&quot;');
   }
 
-  /** Shared chrome so every Meru email looks like it came from one product. */
-  private layout(heading: string, bodyHtml: string): string {
+  /**
+   * Shared chrome, signed by the tenant rather than by the platform.
+   *
+   * The footer used to read "Meru Regulatory OS — meru.com" on every email
+   * including the ones sent to a firm's own clients. An applicant has no
+   * relationship with Meru, so the footer now carries the brand the recipient
+   * recognises, and carries nothing at all when there is no tenant to name.
+   */
+  private layout(heading: string, bodyHtml: string, brand: MailBrand): string {
+    const footer = brand.name
+      ? `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">
+        <p style="color:#6b7280;font-size:12px">${this.escapeHtml(brand.name)}</p>`
+      : '';
+
     return `
       <html><body style="font-family:sans-serif;max-width:600px;margin:auto;color:#111">
         <h2>${this.escapeHtml(heading)}</h2>
         ${bodyHtml}
-        <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">
-        <p style="color:#6b7280;font-size:12px">Meru Regulatory OS &mdash; <a href="https://meru.com">meru.com</a></p>
+        ${footer}
       </body></html>
     `;
+  }
+
+  /**
+   * The plain-text sign-off lines, or none.
+   *
+   * `— The Meru Team` was on every invitation, welcome and reset. Nothing is
+   * better than a wrong name: an unbranded email simply ends after its last
+   * sentence.
+   */
+  private signOff(brand: MailBrand): string[] {
+    return brand.name ? ['', `— ${brand.name}`] : [];
+  }
+
+  /**
+   * The `From` header for a branded message. The verified address from
+   * `RESEND_FROM` is preserved; only the display name becomes the tenant's.
+   */
+  private fromFor(brand: MailBrand): string | undefined {
+    return brand.name ? withDisplayName(this.from, brand.name) : undefined;
   }
 
   private actionButton(url: string, label: string): string {
@@ -153,6 +204,8 @@ export class MailService {
     to: string;
     inviterName: string;
     tenantName: string;
+    /** The recipient's own tenant, resolved by the caller. */
+    brand: MailBrand;
     token: string;
     expiresAt: Date;
   }): Promise<{ delivered: boolean }> {
@@ -161,24 +214,25 @@ export class MailService {
 
     return this.send({
       to: params.to,
-      subject: `${params.inviterName} invited you to ${params.tenantName} on Meru`,
+      from: this.fromFor(params.brand),
+      subject: `${params.inviterName} invited you to join ${params.tenantName}`,
       text: [
-        `${params.inviterName} has invited you to join ${params.tenantName} on Meru.`,
+        `${params.inviterName} has invited you to join ${params.tenantName}.`,
         '',
         `Set your password to get started: ${url}`,
         '',
         `This link can be used once and expires on ${expiry}.`,
         'If you were not expecting this invitation you can ignore this email.',
-        '',
-        '— The Meru Team',
+        ...this.signOff(params.brand),
       ].join('\n'),
       html: this.layout(
         `You have been invited to ${params.tenantName}`,
         `<p><strong>${this.escapeHtml(params.inviterName)}</strong> has invited you to join
-           <strong>${this.escapeHtml(params.tenantName)}</strong> on Meru.</p>
+           <strong>${this.escapeHtml(params.tenantName)}</strong>.</p>
          ${this.actionButton(url, 'Set your password')}
          <p style="color:#6b7280;font-size:13px">This link can be used once and expires on ${expiry}.
             If you were not expecting this invitation you can ignore this email.</p>`,
+        params.brand,
       ),
     });
   }
@@ -189,6 +243,8 @@ export class MailService {
     firstName?: string | null;
     tenantName: string;
     tenantSlug: string;
+    /** The newly provisioned tenant's own brand. */
+    brand: MailBrand;
     plan: string;
     trialEndsAt?: Date | null;
   }): Promise<{ delivered: boolean }> {
@@ -199,11 +255,12 @@ export class MailService {
 
     return this.send({
       to: params.to,
-      subject: `Welcome to Meru — your ${params.tenantName} workspace is ready`,
+      from: this.fromFor(params.brand),
+      subject: `Welcome — your ${params.tenantName} workspace is ready`,
       text: [
         `Hi${params.firstName ? ` ${params.firstName}` : ''},`,
         '',
-        `Your Meru workspace for ${params.tenantName} has been created.`,
+        `Your workspace for ${params.tenantName} has been created.`,
         '',
         `Log in here: ${loginUrl}`,
         '',
@@ -212,19 +269,76 @@ export class MailService {
         trial,
         '',
         'If you have questions, reply to this email.',
-        '',
-        '— The Meru Team',
+        ...this.signOff(params.brand),
       ]
         .filter(Boolean)
         .join('\n'),
       html: this.layout(
-        'Welcome to Meru',
+        `Welcome to ${params.tenantName}`,
         `<p>Your workspace for <strong>${this.escapeHtml(params.tenantName)}</strong> is ready.</p>
          ${this.actionButton(loginUrl, 'Log in to your workspace')}
          <p style="color:#6b7280;font-size:13px">
            Workspace: ${this.escapeHtml(params.tenantSlug)}<br>
            Plan: ${this.escapeHtml(params.plan)}${trial ? `<br>${trial}` : ''}
          </p>`,
+        params.brand,
+      ),
+    });
+  }
+
+  /**
+   * Where a DEF-1 signup invite actually lands.
+   *
+   * `/signup` — what this used to build — **does not exist in the ImmiStack
+   * app.** The provisioning wizard lives at `app/(auth)/onboarding`, and it
+   * reads `?token=` from its own query string. Every invite email sent before
+   * this was a 404 for the recipient: a dead link is worse than no email,
+   * because the operator's side reports `delivered: true`.
+   *
+   * Public so `TenantProvisioningService` can hand the operator the identical
+   * URL it emailed (H3's recovery path) instead of assembling a second one
+   * that could drift from this.
+   */
+  signupInviteUrl(token: string): string {
+    return `${this.appUrl}/onboarding?token=${encodeURIComponent(token)}`;
+  }
+
+  /**
+   * Invitation to self-provision a new workspace via `POST /tenants/signup`
+   * (DEF-1). Distinct from `sendInvite` above, which invites a user *into* an
+   * existing tenant — this invites someone to *create* one, and the link goes
+   * to the onboarding wizard rather than accept-invite.
+   */
+  async sendTenantSignupInvite(params: {
+    to: string;
+    token: string;
+    expiresAt: Date;
+  }): Promise<{ delivered: boolean }> {
+    const url = this.signupInviteUrl(params.token);
+    const expiry = params.expiresAt.toUTCString();
+
+    // The one genuinely unbranded email in the product: the recipient has no
+    // tenant yet — they are being invited to create one — so there is no firm
+    // to sign it for, and naming the platform to someone who was sold a
+    // vertical product would be as wrong as it is on the other three.
+    return this.send({
+      to: params.to,
+      subject: 'You are invited to create a workspace',
+      text: [
+        'You have been invited to create a workspace.',
+        '',
+        `Get started here: ${url}`,
+        '',
+        `This link can be used once and expires on ${expiry}.`,
+        'If you were not expecting this invitation you can ignore this email.',
+      ].join('\n'),
+      html: this.layout(
+        'You are invited to create a workspace',
+        `<p>You have been invited to create a workspace.</p>
+         ${this.actionButton(url, 'Create your workspace')}
+         <p style="color:#6b7280;font-size:13px">This link can be used once and expires on ${expiry}.
+            If you were not expecting this invitation you can ignore this email.</p>`,
+        UNBRANDED_MAIL,
       ),
     });
   }
@@ -233,33 +347,39 @@ export class MailService {
   async sendPasswordReset(params: {
     to: string;
     firstName?: string | null;
+    /** The account holder's own tenant, resolved by the caller. */
+    brand: MailBrand;
     token: string;
     expiresAt: Date;
   }): Promise<{ delivered: boolean }> {
     const url = `${this.appUrl}/reset-password?token=${params.token}`;
     const expiry = params.expiresAt.toUTCString();
+    // "Reset your <firm> password" when the firm is known; a bare "Reset your
+    // password" otherwise. The account is the firm's, not the platform's.
+    const account = params.brand.name ? `${params.brand.name} ` : '';
 
     return this.send({
       to: params.to,
-      subject: 'Reset your Meru password',
+      from: this.fromFor(params.brand),
+      subject: `Reset your ${account}password`,
       text: [
         `Hi${params.firstName ? ` ${params.firstName}` : ''},`,
         '',
-        'We received a request to reset your Meru password.',
+        `We received a request to reset your ${account}password.`,
         '',
         `Reset it here: ${url}`,
         '',
         `This link can be used once and expires on ${expiry}.`,
         'If you did not request this, you can ignore this email — your password will not change.',
-        '',
-        '— The Meru Team',
+        ...this.signOff(params.brand),
       ].join('\n'),
       html: this.layout(
         'Reset your password',
-        `<p>We received a request to reset your Meru password.</p>
+        `<p>We received a request to reset your ${this.escapeHtml(account)}password.</p>
          ${this.actionButton(url, 'Reset password')}
          <p style="color:#6b7280;font-size:13px">This link can be used once and expires on ${expiry}.
             If you did not request this, ignore this email — your password will not change.</p>`,
+        params.brand,
       ),
     });
   }

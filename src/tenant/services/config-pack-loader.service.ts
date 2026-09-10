@@ -192,6 +192,56 @@ export class ConfigPackLoaderService implements OnApplicationBootstrap {
     return problems;
   }
 
+  /**
+   * Every `importMappings[]` entry whose `targetEntityType` is a subject type
+   * (`person`, `organization`) or `lead`, but whose `fields[]` map nothing to
+   * `firstName`, `lastName` or `email`. ADR 0011 §2.3.
+   *
+   * Such a mapping can only ever produce records with no promoted-column
+   * identity — the "unnamed client" failure — and `ImportService.commit`
+   * would write them exactly as silently as it writes today's correct ones.
+   * Both shipped packs are correct today; nothing but this makes that a
+   * property of the system rather than a coincidence.
+   *
+   * **Rejected at LOAD, not at import-commit.** Checking at commit time would
+   * let a bad pack sit live and undetected until the first real import run —
+   * possibly a firm's entire client base, imported once, silently unnamed,
+   * discovered only when someone scrolls the client list. Rejecting here
+   * surfaces the authoring mistake to whoever publishes the pack, before any
+   * tenant's data is at risk. Same failure direction as
+   * `danglingStepReferences` above, for the same reason.
+   *
+   * Core-neutral by construction: it names only `EntityType` values and the
+   * pack's own declared `fields[].to`. It does not know what a "client" is in
+   * any vertical's vocabulary. `vendor` is deliberately absent — a GRC vendor
+   * is a company identified by a legal name, and `vendors_csv` in `grc.json`
+   * maps `legalName` into `verticalAttributes` on purpose; holding it to
+   * `firstName`/`lastName` would reject a correct GovernanceX pack (§7.2).
+   */
+  static unnamedSubjectMappings(pack: ConfigPackDefinition): string[] {
+    const IDENTITY_TARGETS = ['firstName', 'lastName', 'email'];
+    const NEEDS_IDENTITY = new Set(['person', 'organization', 'lead']);
+
+    const problems: string[] = [];
+    for (const mapping of (pack.importMappings ?? []) as Array<{
+      key: string;
+      targetEntityType: string;
+      fields?: Array<{ to: string }>;
+    }>) {
+      if (!NEEDS_IDENTITY.has(mapping.targetEntityType)) continue;
+
+      const targets = new Set((mapping.fields ?? []).map((f) => f.to));
+      const hasIdentity = IDENTITY_TARGETS.some((t) => targets.has(t));
+      if (!hasIdentity) {
+        problems.push(
+          `importMappings[${mapping.key}] targets '${mapping.targetEntityType}' but maps ` +
+            `no field to firstName, lastName, or email`,
+        );
+      }
+    }
+    return problems;
+  }
+
   /** The field an array element is identified by, in precedence order. */
   private static identityOf(item: unknown): string | null {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
@@ -294,6 +344,19 @@ export class ConfigPackLoaderService implements OnApplicationBootstrap {
         );
         if (dangling.length) {
           report.errors.push(`${file}: ${dangling.join('; ')}`);
+          continue;
+        }
+
+        // Second referential check Zod cannot express — ADR 0011 §2.3. An
+        // import mapping that produces subject records with nothing in
+        // firstName/lastName/email produces a client list of unnamed rows,
+        // and does it silently. Reject the pack so the author sees it, in
+        // exactly the same shape and with the same `continue` as above.
+        const unnamed = ConfigPackLoaderService.unnamedSubjectMappings(
+          result.data,
+        );
+        if (unnamed.length) {
+          report.errors.push(`${file}: ${unnamed.join('; ')}`);
           continue;
         }
 

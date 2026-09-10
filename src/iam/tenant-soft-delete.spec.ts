@@ -19,9 +19,11 @@ describe('TenantProvisioningService.softDeleteTenant', () => {
       tenantRepo as never,
       undefined as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       undefined as never,
       undefined as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   const activeTenant = {
@@ -109,9 +111,11 @@ describe('TenantProvisioningService.listAllTenants — deleted-tenant filtering'
       tenantRepo as never,
       userRepo as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       undefined as never,
       undefined as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   beforeEach(() => find.mockClear());
@@ -144,9 +148,11 @@ describe('TenantProvisioningService.getPlatformStats — deleted-tenant filterin
       tenantRepo as never,
       userRepo as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       undefined as never,
       undefined as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   it('always excludes deleted tenants — no override', async () => {
@@ -167,9 +173,11 @@ describe('TenantProvisioningService.setTenantStatus — agrees with soft-delete 
       tenantRepo as never,
       undefined as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       undefined as never,
       undefined as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   beforeEach(() => {

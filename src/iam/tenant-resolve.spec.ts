@@ -19,9 +19,11 @@ describe('TenantProvisioningService.resolveByHost', () => {
       tenantRepo as never,
       undefined as never,
       undefined as never,
+      undefined as never, // tenantSignupInviteRepo
       undefined as never,
       configService as never,
       undefined as never,
+      undefined as never, // auditService
     );
 
   const acme = {

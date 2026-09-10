@@ -11,7 +11,48 @@ ok(){ printf "  PASS  %s\n" "$1"; pass=$((pass+1)); }
 no(){ printf "  FAIL  %s — %s\n" "$1" "$2"; fail=$((fail+1)); }
 jqid(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);console.log(eval('j'+process.argv[1])||'')}catch(e){console.log('')}})" "$1"; }
 
-mktenant() { # slug-prefix -> "tenantId token slug"
+# ── Operator session, for minting signup invites (DEF-1) ─────────────────────
+#
+# `POST /tenants/signup` now requires a `token` minted by
+# `POST /tenants/invitations` (platform_admin only). Before this block, this
+# script called signup with no token: both calls 400'd, $TOKA/$TOKB came back
+# empty and the run died at "cannot continue" — a BOOTSTRAP failure, not a red
+# test, so the only endpoint-level "valid token, wrong tenant" suite in the repo
+# went quiet rather than going red. Do not let that shape recur: if this section
+# cannot get an operator session it must FAIL LOUDLY, never skip.
+#
+# `SWEEP_EMAIL`/`SWEEP_PASSWORD` is the same operator-credential convention
+# `scripts/smoke/api-sweep.js` already uses; one of the three sweep accounts is
+# platform_admin. Nothing is defaulted — a committed credential on a tenant
+# nobody can delete is exactly the trap the password note below records.
+OP_TOKEN=""
+op_login() {
+  if [ -z "$SWEEP_EMAIL" ] || [ -z "$SWEEP_PASSWORD" ]; then
+    echo "SWEEP_EMAIL / SWEEP_PASSWORD are not set."
+    echo "This script provisions two probe tenants, and POST /tenants/signup"
+    echo "requires an invite token minted by a platform_admin (DEF-1)."
+    echo "Export a platform_admin's credentials, or pre-mint two tokens and"
+    echo "export XT_INVITE_TOKEN_A / XT_INVITE_TOKEN_B instead."
+    return 1
+  fi
+  local l=$(curl -s -m 45 -X POST "$B/auth/login" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$SWEEP_EMAIL\",\"password\":\"$SWEEP_PASSWORD\"}")
+  OP_TOKEN=$(echo "$l" | jqid "?.data?.access_token")
+  [ -n "$OP_TOKEN" ]
+}
+
+mkinvite() { # email -> raw signup token
+  # The raw token comes back in the response body as well as the email — see
+  # `TenantProvisioningService.mintSignupInvite`. Without that, the token would
+  # exist only inside a message this script cannot read, and there would be no
+  # way to provision a probe tenant at all.
+  local r=$(curl -s -m 45 -X POST "$B/tenants/invitations" \
+    -H "Authorization: Bearer $OP_TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$1\"}")
+  echo "$r" | jqid "?.data?.token"
+}
+
+mktenant() { # slug-prefix [pre-minted token] -> "tenantId token slug"
   # Password used to be the committed literal "ProbePassw0rd!23". This script's
   # own usage comment above says to point BASE_URL at production, and there is
   # still no DELETE /tenants/:id (AGENTS.md — two sweep-pilot-* tenants already
@@ -23,8 +64,15 @@ mktenant() { # slug-prefix -> "tenantId token slug"
   # (create-tenant.dto.ts), so 32 hex chars clears it with room to spare.
   local slug="$1-$RANDOM" email="$1-$RANDOM@probe.test"
   local pw="Px1_$(openssl rand -hex 16 2>/dev/null || echo "${RANDOM}${RANDOM}${RANDOM}${RANDOM}")"
+
+  # An invite is minted for THIS address: `usedAt` makes it single-use and the
+  # invite pins the redeeming email, so the two probe tenants cannot share one.
+  local invite="$2"
+  [ -z "$invite" ] && invite=$(mkinvite "$email")
+  if [ -z "$invite" ]; then echo "  "; return; fi
+
   local s=$(curl -s -m 45 -X POST "$B/tenants/signup" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$1\",\"slug\":\"$slug\",\"vertical\":\"immigration\",\"firstName\":\"A\",\"lastName\":\"B\",\"email\":\"$email\",\"password\":\"$pw\"}")
+    -d "{\"name\":\"$1\",\"slug\":\"$slug\",\"vertical\":\"immigration\",\"firstName\":\"A\",\"lastName\":\"B\",\"email\":\"$email\",\"password\":\"$pw\",\"token\":\"$invite\"}")
   # Single envelope: `{ data: { tenant, user, ... } }`. This used to read
   # `data.data.tenant.id` because the handler self-wrapped in `{success,data}`
   # and the interceptor then wrapped that again. That double envelope is gone.
@@ -36,11 +84,30 @@ mktenant() { # slug-prefix -> "tenantId token slug"
 }
 
 echo "── Provisioning two tenants ───────────────────────────────"
-read TA TOKA SLUGA <<< "$(mktenant xt-alpha)"
-read TB TOKB SLUGB <<< "$(mktenant xt-bravo)"
+# Pre-minted tokens win, so this suite can also run where an operator password
+# is not available to the runner (a CI job holding two short-lived tokens as
+# secrets rather than a long-lived credential).
+if [ -z "$XT_INVITE_TOKEN_A" ] || [ -z "$XT_INVITE_TOKEN_B" ]; then
+  # A bootstrap failure must be counted as a FAILURE, not a quiet exit. The
+  # DEF-1 regression that killed this suite exited 1 from the block below with
+  # `0 passed, 0 failed` printed above it — which reads like a suite that had
+  # nothing to do rather than one that could not start.
+  op_login || {
+    no "operator session" "SWEEP_EMAIL/SWEEP_PASSWORD unusable — cannot mint signup invites"
+    echo "══ $pass passed, $fail failed ══"
+    exit 1
+  }
+  ok "operator session for invite minting"
+fi
+read TA TOKA SLUGA <<< "$(mktenant xt-alpha "$XT_INVITE_TOKEN_A")"
+read TB TOKB SLUGB <<< "$(mktenant xt-bravo "$XT_INVITE_TOKEN_B")"
 [ -n "$TA" ] && [ -n "$TOKA" ] && ok "tenant A $TA" || no "tenant A" "signup/login failed"
 [ -n "$TB" ] && [ -n "$TOKB" ] && ok "tenant B $TB" || no "tenant B" "signup/login failed"
-[ -z "$TOKA" ] || [ -z "$TOKB" ] && { echo "cannot continue"; exit 1; }
+[ -z "$TOKA" ] || [ -z "$TOKB" ] && {
+  no "bootstrap" "could not provision both probe tenants — every isolation check below is UNRUN, not passed"
+  echo "══ $pass passed, $fail failed ══"
+  exit 1
+}
 
 echo
 echo "── Each tenant writes one entity ──────────────────────────"

@@ -30,8 +30,8 @@ import { StorageService } from './storage.service';
 import { CurrentUser } from '../iam/decorators/current-user.decorator';
 import type { UserPayload } from '../common/types';
 import { TenantId } from '../tenant/decorators/tenant-id.decorator';
-import { JwtAuthGuard } from '../iam/guards/jwt-auth.guard';
 import { UseGuards } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import {
   UploadFileDto,
   UpdateFileDto,
@@ -52,7 +52,7 @@ import {
 
 @ApiTags('Storage')
 @ApiBearerAuth('JWT-auth')
-@UseGuards(JwtAuthGuard)
+@UseGuards(AuthGuard('jwt'))
 @Controller('storage')
 export class StorageController {
   constructor(private readonly storageService: StorageService) {}

@@ -33,6 +33,7 @@ import { SearchDocumentsDto } from './dto/search-documents.dto';
 import { RequestDocumentUploadUrlDto } from './dto/request-upload-url.dto';
 import { OrchestrationService } from '../orchestration/orchestration.service';
 import { DocumentAccessService } from './document-access.service';
+import { DocumentRequestService } from './document-request.service';
 import type { Actor } from '../common/access';
 
 // Exported because the controller now returns it directly (it used to be
@@ -65,6 +66,9 @@ export class DocumentsService {
     // key. This service used to construct its own aws-sdk S3 client, which
     // bypassed both and meant the provider abstraction bought nothing.
     private storage: StorageService,
+    // Bookkeeping only: whether a document arriving satisfies the pack
+    // checklist, and therefore whether a document chase should stop.
+    private documentRequests: DocumentRequestService,
   ) {}
 
   async upload(
@@ -72,6 +76,13 @@ export class DocumentsService {
     dto: UploadDocumentDto,
     tenantId: string,
     actor: Actor,
+    /**
+     * The caller's tenant vertical (`PolicyGuard` puts it on the request), so
+     * a document arriving can be checked against the pack's checklist. Absent
+     * means the checklist cannot be resolved, and nothing is stamped — never
+     * that the checklist is complete.
+     */
+    vertical?: string | null,
   ): Promise<UploadResult> {
     const userId = actor.id;
     this.logger.log(`Uploading document: ${dto.name} for tenant: ${tenantId}`);
@@ -119,6 +130,8 @@ export class DocumentsService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
+
+    let result: UploadResult;
 
     try {
       const document = queryRunner.manager.create(Document, {
@@ -187,7 +200,7 @@ export class DocumentsService {
         this.triggerAIAnalysis(document.id, tenantId, null);
       }
 
-      return {
+      result = {
         document,
         version,
         url: await this.storage.signedReadUrl(tenantId, s3Key, stored.provider),
@@ -198,6 +211,56 @@ export class DocumentsService {
       throw error;
     } finally {
       await queryRunner.release();
+    }
+
+    // After the connection is back in the pool, never inside the transaction:
+    // the serverless pool is `{ max: 1 }`, so a second acquire while this
+    // request still holds the only connection blocks for the full
+    // connectionTimeoutMillis. Awaited rather than fired and forgotten,
+    // because a serverless function may freeze the moment it responds, and a
+    // chase that never stops is worse than a slightly slower upload.
+    await this.recordDocumentIntake(
+      dto.linkedEntityId,
+      tenantId,
+      actor,
+      vertical,
+    );
+
+    return result;
+  }
+
+  /**
+   * A document has been filed against a record — re-check the pack checklist
+   * and, if nothing required is outstanding any more, stamp
+   * `documentsReceivedAt` so the pack's chase sequence stops.
+   *
+   * Swallows everything. The document is already stored and the caller is
+   * holding a successful upload; failing it here over bookkeeping would turn
+   * a filed passport into a 500.
+   */
+  private async recordDocumentIntake(
+    linkedEntityId: string | undefined,
+    tenantId: string,
+    actor: Actor,
+    vertical?: string | null,
+  ): Promise<void> {
+    if (!linkedEntityId) return;
+
+    try {
+      const result = await this.documentRequests.recordIntake({
+        tenantId,
+        vertical: vertical ?? null,
+        actor,
+        entityId: linkedEntityId,
+      });
+      this.logger.debug(
+        `Document intake on ${linkedEntityId}: ${result.outcome}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Document intake bookkeeping failed for ${linkedEntityId}: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
     }
   }
 
@@ -248,6 +311,8 @@ export class DocumentsService {
     dto: CreateDocumentDto,
     tenantId: string,
     actor: Actor,
+    /** As `upload()` — the vertical whose checklist a receipt is judged against. */
+    vertical?: string | null,
   ): Promise<Document> {
     const userId = actor.id;
     this.logger.log(`Creating document: ${dto.name} for tenant: ${tenantId}`);
@@ -357,6 +422,16 @@ export class DocumentsService {
       saved.currentVersionId = versionId;
       await this.documentRepo.save(saved);
     }
+
+    // The direct-to-bucket path finalises here rather than in `upload()`, so
+    // the same intake bookkeeping has to run on both or half the uploads in
+    // the product would never stop a chase.
+    await this.recordDocumentIntake(
+      dto.linkedEntityId,
+      tenantId,
+      actor,
+      vertical,
+    );
 
     return saved;
   }

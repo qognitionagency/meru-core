@@ -87,6 +87,15 @@ export enum MeruErrorCode {
    * request did something.
    */
   TENANT_ALREADY_DELETED = 'MER-TENANT-0008',
+  /**
+   * HTTP 400 — `POST /tenants/signup`'s `token` is missing, unknown, expired,
+   * already used, or bound to a different email/slug/vertical/plan than the
+   * request declares. One code and one message for all of those on purpose,
+   * mirroring `IamService.resetPassword`'s anti-enumeration posture:
+   * distinguishing "used" from "expired" from "wrong email" would turn the
+   * endpoint into an oracle for which invites are live.
+   */
+  TENANT_SIGNUP_INVITE_INVALID = 'MER-TENANT-0009',
 
   // Validation (MER-VAL-xxxx)
   VALIDATION_ERROR = 'MER-VAL-0001',
@@ -221,6 +230,25 @@ export interface DirectoryUser {
   role: string;
   roles: string[];
   department: string | null;
+  /**
+   * FR-1.2 — the practitioner's registration number, or null when they hold
+   * none. Paired with `practitionerCredentialType`; never one without the
+   * other.
+   */
+  practitionerCredential: string | null;
+  /** Which register the number is on — `marn`, `oisc`, `rcic`. */
+  practitionerCredentialType: string | null;
+  /**
+   * Always `false` today, and sent explicitly rather than omitted.
+   *
+   * The credential is self-asserted by the firm; nothing checks it against
+   * OMARA, OISC or CICC, and no adapter could — every regulator adapter is
+   * sandbox (CLAUDE.md §13). A UI forced to read `false` cannot accidentally
+   * render a verified tick; an absent field invites one. When a real registry
+   * check exists it carries its own provenance and its own timestamp — it does
+   * not retro-fit meaning onto this flag.
+   */
+  practitionerCredentialVerified: boolean;
   status: string;
   lastActiveAt: Date | null;
   createdAt: Date;

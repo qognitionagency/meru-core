@@ -100,6 +100,34 @@ jobs:
             npm run rls:verify
           fi
 
+      # The endpoint-level half of tenant isolation, and the ONLY "valid token,
+      # wrong tenant" suite in the repo. `rls:verify` above proves the database
+      # policies hold; this proves the API layered on top of them does not hand
+      # tenant A tenant B's rows by some route that never reaches a policy.
+      #
+      # It was not wired in here, which is why nothing caught DEF-1 making
+      # `CreateTenantDto.token` required: the script's two probe signups started
+      # 400ing, it exited at "cannot continue", and the suite stopped running
+      # without anything turning red. A tenancy suite that is not in CI is a
+      # suite that will rot — it did.
+      #
+      # Runs against a deployed target, so it needs BOTH a base URL and an
+      # operator credential to mint signup invites (DEF-1). Skips with a warning
+      # when they are absent — forks and secretless clones must not red-X on a
+      # missing credential — but a configured runner that then FAILS is a hard
+      # gate, exactly like rls:verify.
+      - name: Cross-tenant isolation over HTTP
+        env:
+          BASE_URL: ${{ secrets.SMOKE_BASE_URL }}
+          SWEEP_EMAIL: ${{ secrets.SMOKE_OPERATOR_EMAIL }}
+          SWEEP_PASSWORD: ${{ secrets.SMOKE_OPERATOR_PASSWORD }}
+        run: |
+          if [ -z "$BASE_URL" ] || [ -z "$SWEEP_EMAIL" ] || [ -z "$SWEEP_PASSWORD" ]; then
+            echo "::warning::SMOKE_BASE_URL / SMOKE_OPERATOR_EMAIL / SMOKE_OPERATOR_PASSWORD not set — cross-tenant HTTP isolation SKIPPED. Set all three to enforce this gate."
+          else
+            npm run smoke:tenancy
+          fi
+
       # Not a gate yet: the existing code has pre-existing lint findings.
       - name: Lint
         run: npm run lint

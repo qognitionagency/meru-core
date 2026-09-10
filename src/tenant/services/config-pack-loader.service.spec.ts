@@ -195,6 +195,137 @@ describe('packs on disk', () => {
     ]);
   });
 
+  it('every shipped pack maps an identity field on every subject import', () => {
+    // ADR 0011 §2.3. `ImportService.commit` writes whatever a mapping says, so
+    // a mapping that targets `person`/`organization`/`lead` and points every
+    // `to` at `verticalAttributes.*` imports a firm's entire client base as
+    // rows with no name on the promoted columns — silently, discovered when
+    // someone scrolls the client list. Both shipped packs are correct today;
+    // this is what makes that a property of the system rather than luck.
+    for (const file of files) {
+      const resolved = resolveFile(file);
+      const parsed = safeValidateConfigPack(resolved);
+      if (!parsed.success) continue; // the schema test below reports it
+      expect({
+        file: path.basename(file),
+        unnamed: ConfigPackLoaderService.unnamedSubjectMappings(parsed.data),
+      }).toEqual({ file: path.basename(file), unnamed: [] });
+    }
+  });
+
+  it('unnamedSubjectMappings names the offending mapping', () => {
+    const pack = safeValidateConfigPack({
+      code: 'x',
+      name: 'fixture',
+      version: '1.0.0',
+      vertical: 'immigration',
+      locales: ['en'],
+      importMappings: [
+        {
+          key: 'good_csv',
+          label: 'good',
+          source: 'csv',
+          targetEntityType: 'person',
+          fields: [{ from: 'First Name', to: 'firstName' }],
+        },
+        {
+          key: 'bad_csv',
+          label: 'bad',
+          source: 'csv',
+          targetEntityType: 'person',
+          fields: [
+            { from: 'Passport', to: 'verticalAttributes.passportNumber' },
+            { from: 'Nationality', to: 'verticalAttributes.nationality' },
+          ],
+        },
+        {
+          key: 'bad_leads',
+          label: 'bad leads',
+          source: 'csv',
+          targetEntityType: 'lead',
+          fields: [{ from: 'Source', to: 'verticalAttributes.source' }],
+        },
+      ],
+    });
+    expect(pack.success ? [] : pack.error.issues).toEqual([]);
+    if (!pack.success) return;
+
+    expect(ConfigPackLoaderService.unnamedSubjectMappings(pack.data)).toEqual([
+      "importMappings[bad_csv] targets 'person' but maps no field to firstName, lastName, or email",
+      "importMappings[bad_leads] targets 'lead' but maps no field to firstName, lastName, or email",
+    ]);
+  });
+
+  it('accepts lastName or email alone — a walk-in client may have neither a first name nor an email', () => {
+    // ADR 0011 §3 rejected "require email on every subject" as over-broad. Any
+    // ONE of the three identity targets is enough; the check is about a
+    // mapping that can only ever produce a blank, not about mandating a
+    // particular field.
+    for (const to of ['firstName', 'lastName', 'email']) {
+      const pack = safeValidateConfigPack({
+        code: 'x',
+        name: 'fixture',
+        version: '1.0.0',
+        vertical: 'immigration',
+        locales: ['en'],
+        importMappings: [
+          {
+            key: 'm',
+            label: 'm',
+            source: 'csv',
+            targetEntityType: 'organization',
+            fields: [{ from: 'X', to }],
+          },
+        ],
+      });
+      if (!pack.success) throw new Error('fixture did not validate');
+      expect(ConfigPackLoaderService.unnamedSubjectMappings(pack.data)).toEqual(
+        [],
+      );
+    }
+  });
+
+  it("does not hold a GovX vendor mapping to a person's name shape", () => {
+    // §7.2 — the stacking rule. `grc.json`'s `vendors_csv` targets `vendor`
+    // and maps `legalName` into verticalAttributes deliberately: a vendor is a
+    // company identified by a registered name, not a first/last pair. A check
+    // that rejected it would break a correct GovernanceX pack for the sake of
+    // an ImmiStack requirement.
+    const pack = safeValidateConfigPack({
+      code: 'x',
+      name: 'fixture',
+      version: '1.0.0',
+      vertical: 'grc',
+      locales: ['en'],
+      importMappings: [
+        {
+          key: 'vendors_csv',
+          label: 'vendors',
+          source: 'csv',
+          targetEntityType: 'vendor',
+          fields: [{ from: 'Legal Name', to: 'verticalAttributes.legalName' }],
+        },
+      ],
+    });
+    if (!pack.success) throw new Error('fixture did not validate');
+    expect(ConfigPackLoaderService.unnamedSubjectMappings(pack.data)).toEqual(
+      [],
+    );
+  });
+
+  it('the loader actually runs the check, not merely declares it', () => {
+    // Same source-text guard the schema/loader parity block above uses, and
+    // for the same reason: a validation function nobody calls is exactly the
+    // "validates, stores, read by nobody" shape CLAUDE.md §4.1 warns about.
+    const source = fs.readFileSync(
+      path.resolve(__dirname, 'config-pack-loader.service.ts'),
+      'utf-8',
+    );
+    expect(source).toMatch(
+      /ConfigPackLoaderService\.unnamedSubjectMappings\(\s*result\.data,?\s*\)/,
+    );
+  });
+
   it('found packs to check', () => {
     expect(files.length).toBeGreaterThan(0);
   });

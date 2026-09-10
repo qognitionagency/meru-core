@@ -57,6 +57,8 @@ describe('client list scope fails closed', () => {
       {} as any,
       {} as any,
       {} as any,
+      // dataSource — list scoping never opens a transaction.
+      {} as any,
     );
 
     return { service, conditions };

@@ -29,14 +29,18 @@ import {
 import { DocumentsService } from './documents.service';
 import { DocumentChecklistService } from './document-checklist.service';
 import { DocumentGenerationService } from './document-generation.service';
+import { DocumentRequestService } from './document-request.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { UploadDocumentDto } from './dto/upload-document.dto';
 import { RequestDocumentUploadUrlDto } from './dto/request-upload-url.dto';
+import { RequestChecklistDocumentsDto } from './dto/request-checklist-documents.dto';
 import { SearchDocumentsDto } from './dto/search-documents.dto';
 import { ChecklistResponseDto } from './dto/checklist-response.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { PolicyGuard } from '../iam/guards/policy.guard';
+import { Roles } from '../iam/decorators/roles.decorator';
+import { PlatformRole } from '../iam/enums/platform-role.enum';
 import { CitationEnforcementInterceptor } from '../ai/interceptors/citation-enforcement.interceptor';
 import type { AuthenticatedRequest } from '../common/types';
 import { paginated } from '../common/paginated';
@@ -57,6 +61,7 @@ export class DocumentsController {
     private readonly documentsService: DocumentsService,
     private readonly documentChecklistService: DocumentChecklistService,
     private readonly generation: DocumentGenerationService,
+    private readonly documentRequests: DocumentRequestService,
   ) {}
 
   @Post('upload')
@@ -69,7 +74,7 @@ export class DocumentsController {
   async upload(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: UploadDocumentDto,
-    @Request() req: AuthenticatedRequest,
+    @Request() req: AuthenticatedRequest & { tenantVertical?: string | null },
   ) {
     if (!file) {
       throw new BadRequestException('File is required');
@@ -80,6 +85,9 @@ export class DocumentsController {
       dto,
       req.user.tenantId,
       req.user,
+      // So a document landing on a case can be checked against the pack
+      // checklist, and a chase stopped once nothing required is outstanding.
+      req.tenantVertical ?? null,
     );
 
     return result;
@@ -120,12 +128,13 @@ export class DocumentsController {
   @ApiResponse({ status: 400, description: 'Bad request' })
   async create(
     @Body() dto: CreateDocumentDto,
-    @Request() req: AuthenticatedRequest,
+    @Request() req: AuthenticatedRequest & { tenantVertical?: string | null },
   ) {
     const document = await this.documentsService.create(
       dto,
       req.user.tenantId,
       req.user,
+      req.tenantVertical ?? null,
     );
 
     return document;
@@ -203,7 +212,63 @@ export class DocumentsController {
     );
   }
 
+  @Post('checklist/request')
+  // Requesting documents is firm work: it is the act that starts a chase
+  // sequence against the client, so a client must not be able to perform it on
+  // their own record. `DocumentRequestService` re-checks scope in the service
+  // anyway — the guard is the first barrier, not the only one.
+  @Roles(PlatformRole.FIRM_ADMIN, PlatformRole.STAFF)
+  @ApiOperation({
+    summary: 'Record that a record’s outstanding documents have been requested',
+    description:
+      'Writes `verticalAttributes.documentsRequestedAt` on the record and ' +
+      'clears any previous `documentsReceivedAt` — the two fields the ' +
+      "immigration pack's `chase_outstanding_documents` sequence and its " +
+      '`documents_outstanding_14d` alert rule are authored against. Nothing ' +
+      'in the API wrote either one before, so both were inert.\n\n' +
+      '**Why a route and not a side effect of sending an email.** A chase ' +
+      'must never fire for a document nobody asked for (CLAUDE.md §7.3: ' +
+      '"not asked" is not "missing"), so the trigger is a deliberate act ' +
+      'with an audit trail in `updatedAt`, not an inference.\n\n' +
+      'Pass `templateKey` to also send the pack template that asks for them ' +
+      '(the immigration pack ships `document_request`). The response reports ' +
+      '`notified` honestly — a request recorded but not sent is a legitimate ' +
+      'case (the firm asked by phone) and must not look like a client was ' +
+      'written to.\n\n' +
+      'The chase itself runs from `/jobs/tick?scope=fast` → ' +
+      '`messaging-sequences`, whose first step is +72h.',
+  })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Request recorded. `outstandingRequired` is nullable: null means the ' +
+      'checklist could not be resolved, never "nothing outstanding".',
+  })
+  @ApiResponse({
+    status: 404,
+    description:
+      'No such record in this tenant, or one the caller may not reach — the ' +
+      'same 404 either way, matching GET /documents/checklist.',
+  })
+  async requestChecklistDocuments(
+    @Body() dto: RequestChecklistDocumentsDto,
+    @Request() req: AuthenticatedRequest & { tenantVertical?: string | null },
+  ) {
+    return this.documentRequests.recordRequest({
+      tenantId: req.user.tenantId,
+      vertical: req.tenantVertical ?? null,
+      actor: req.user,
+      entityId: dto.entityId,
+      templateKey: dto.templateKey,
+    });
+  }
+
   @Get('templates')
+  // Enumerates the firm's whole document-template catalogue; a client has no
+  // legitimate reason to list it (they generate a specific known template via
+  // POST /documents/generate/:templateKey, which is separately scoped to
+  // their own record).
+  @Roles(PlatformRole.FIRM_ADMIN, PlatformRole.STAFF)
   @ApiOperation({
     summary: 'Documents this tenant can generate',
     description:
@@ -252,7 +317,13 @@ export class DocumentsController {
     status: 400,
     description: 'A required value is missing on the record',
   })
-  @ApiResponse({ status: 404, description: 'No such template in this pack' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'No such template in this pack, OR entityId names a record the ' +
+      'caller may not read — a client gets the same 404 for a foreign ' +
+      'entityId as for one that does not exist, on purpose.',
+  })
   async generate(
     @Request() req: AuthenticatedRequest & { tenantVertical?: string | null },
     @Param('templateKey') templateKey: string,
@@ -264,6 +335,7 @@ export class DocumentsController {
       req.user.tenantId,
       req.tenantVertical ?? null,
       templateKey,
+      req.user,
       entityId,
     );
 

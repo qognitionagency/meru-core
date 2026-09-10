@@ -153,12 +153,27 @@ function createRateLimiter(env = process.env) {
       },
     },
     keyGenerator: (req) => {
-      // Rate limit key: IP + tenant for multi-tenant fairness — same shape
-      // as main.ts, not tenant-only, since an unauthenticated /auth/login
-      // caller has no trustworthy tenant yet.
-      const tenantId = req.headers['x-tenant-id'] || 'anonymous';
-      const ip = req.ip || req.socket.remoteAddress || 'unknown';
-      return `${ip}::${tenantId}`;
+      // Rate limit key: **IP only**, deliberately.
+      //
+      // This used to be `${ip}::${x-tenant-id}`. `X-Tenant-Id` is an
+      // unauthenticated, client-supplied header on `/auth/*`, so varying it
+      // minted an unlimited number of independent buckets from a single
+      // address — which made this limiter evadable for credential stuffing by
+      // anyone who read the header name off the CORS allowlist. The old
+      // comment even conceded the premise ("an unauthenticated /auth/login
+      // caller has no trustworthy tenant yet") and then used it in the key
+      // anyway.
+      //
+      // Per-tenant fairness cannot come from forgeable input. This middleware
+      // runs before Nest routing (and therefore before authentication), so
+      // there is no trustworthy tenant available to it at all. Real per-tenant
+      // limiting belongs after auth, in the Upstash-backed limiter of ADR 0004.
+      //
+      // Accepted trade-off: callers sharing an egress IP (one office behind
+      // NAT) now share a bucket. That is the standard behaviour of every
+      // IP-based limiter, and it errs toward limiting too much rather than
+      // toward not limiting at all.
+      return req.ip || req.socket.remoteAddress || 'unknown';
     },
   });
 

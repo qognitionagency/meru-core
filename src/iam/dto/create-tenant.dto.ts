@@ -77,4 +77,16 @@ export class CreateTenantDto {
   @MinLength(8)
   @MaxLength(128)
   password: string;
+
+  @ApiProperty({
+    example: 'k3f8x...',
+    description:
+      'Signup invite token from POST /tenants/invitations (DEF-1). ' +
+      'Required — unauthenticated self-signup with no invite is no longer ' +
+      'accepted; see AddTenantSignupInvites migration.',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  token: string;
 }

@@ -11,7 +11,7 @@
   commit, or collapse them: `ln -sf` the workspace path at this file once the
   team agrees which location wins.
 
-  Mirrored 2026-09-09.
+  Mirrored 2026-09-09; re-synced 2026-09-10.
 -->
 
 # CLAUDE.md — the Meru workspace
@@ -21,13 +21,26 @@ Durable architecture for everything under `~/dev/meru/`.
 Read this before touching either repo. It is the map and the shared rules; the
 details live in the per-repo and per-app docs named in §1.
 
-> **Last verified 2026-09-08 (Jonas, `curl /api-json`).** `/api-json` = **274 paths / 326
-> operations** — up from 273/325 on 2026-09-05; `auth` dropped one path (`POST /auth/register`
-> removed, per §16) and a new `alerts` prefix (2 paths) appeared, not yet traced to a
-> controller. `GET /health/capabilities` = **2 live / 12 unconfigured**, `[UNVERIFIED: recount]`
-> — that route now requires an operator token (§16, "role check is inert — FIXED 2026-09-07")
-> and this pass had none, so this figure is carried forward from 2026-09-05, not re-checked.
-> Any doc citing 248, 257, 262, 272 or 273 predates this pass.
+> **Last verified 2026-09-10 (Jonas, `curl` against `meru-core.vercel.app`).** `/api-json` =
+> **278 paths / 331 operations** — up from 274/326 on 2026-09-08, and 273/325 on 2026-09-05.
+> That is the **deployed** spec; uncommitted work in this tree is not in it (see §16 — the new
+> `POST /tenants/invitations` is absent from the live spec, confirmed).
+>
+> **The `alerts` prefix flagged "not yet traced to a controller" on 2026-09-08 is now traced.**
+> `src/rules/alert-rule.controller.ts:53` declares `@Controller('alerts')` under
+> `@ApiTags('rules')` (commit `1d24e6d`). The prefix and the tag disagree by design, so
+> `/alerts` and `/alerts/resolved` file under **rules** in Swagger and searching the spec by
+> tag name never finds them. Staff-and-above; a `client` cannot read a firm's alert firings.
+>
+> **Capabilities: 3 live · 1 degraded · 10 unconfigured · 0 unknown** (14 total), read from the
+> `capabilities` summary block of the **unauthenticated** `GET /api/v1/health` on 2026-09-10.
+> The detailed `GET /health/capabilities` requires an operator token and returns
+> `MER-AUTH-0001` at HTTP **401** without one — re-verified today, so §16's "role check is
+> inert" is confirmed closed at runtime and not merely in source. Note that the *counts* are
+> public on `/health` while the *names* are not; that is the current behaviour, not a finding.
+>
+> Any doc citing 248, 257, 262, 272, 273 or 274 paths, or "2 live / 12 unconfigured", predates
+> this pass.
 
 ---
 
@@ -195,14 +208,33 @@ project `immistack-marketing`) and `app.immistack.com` serves the product
 
 | Vertical | Base pack | Country overlays | UI app | Vertical DB |
 |---|---|---|---|---|
-| **Immigration** | `verticals/immigration.json` **2.3.0** | `au` **2.4.0** · `ca` 2.2.0 · `uk` 2.2.0 (**country `GB`**) · `nz` 2.2.0 | `immistack/` | `IMMISTACK_DB_URL` |
+| **Immigration** | `verticals/immigration.json` **2.6.0** | `au` **2.8.0** · `ca` **2.4.0** · `uk` **2.4.0** (**country `GB`**) · `nz` **2.4.0** | `immistack/` | `IMMISTACK_DB_URL` |
 | **Banking GRC** | `verticals/grc.json` **2.1.0** | `ae` · `sa` · `qa` · `bh` — all **2.1.0** | `governancex/` | `GOVX_DB_URL` |
 | `labour` | **none** | — | — | control plane |
 | *(operator)* | n/a | n/a | `meru-dashboard/` | control plane |
 
-Versions read directly from the JSON on disk, 2026-09-05. AU is ahead of the base because
-`config-pack-loader.service.ts` now rejects a resolved pack whose fee/stage `atStep` names no
-real workflow step (§6), and AU 2.4.0 is the fix for that (`countries/au-immigration.json`).
+**Versions re-read directly from the JSON on disk, 2026-09-10** — every one of them, not
+carried forward. The previous table (immigration 2.3.0, au 2.4.0, ca/uk/nz 2.2.0) was five
+bumps stale on AU alone. GRC and its four overlays are genuinely all still **2.1.0**.
+
+AU is ahead of the base because `config-pack-loader.service.ts` rejects a resolved pack whose
+fee/stage `atStep` names no real workflow step (§6); AU 2.4.0 was that fix, and 2.5.0–2.8.0
+added the four subclass workflows and the APP 1.8 disclosure template on top.
+
+**Where the workflows actually live, because this is easy to get backwards.** The base
+`immigration.json` v2.6.0 carries **exactly one** workflow, `482-tss-employer-sponsored`
+(21 `documentTypes`, 3 `documentTemplates` — `cost_agreement`, `tax_invoice`,
+`lodgement_confirmation` — 5 `fees`, 3 `rules`, 5 `alertRules`). `wf_student_500`,
+`wf_skilled_189`, `wf_graduate_485`, `wf_visitor_600` and the 14-step `wf_visa_matter` are in
+the **AU overlay** `countries/au-immigration.json` v2.8.0, together with its single
+`documentTemplates` entry `adm_disclosure`, 4 `fees` and 4 `alertRules`. The AU overlay
+declares no `documentTypes`, no `entityTypes` and no `rules` of its own — it inherits them.
+
+> **Production is not on these versions.** `config_packs` held `immigration` and
+> `au-immigration` at **v2.3.0** when the database was checked on 2026-09-08, because
+> `SKIP_CONFIG_PACK_LOADER=true` is set on Vercel Production. Bumping a version on disk ships
+> nothing. See §16 for the one-call remedy and what changes when you make it. Not re-verified
+> against the database today — `[UNVERIFIED: production config_packs versions as at 2026-09-10]`.
 
 `labour` is a legal tenant vertical with **no pack**. `VerticalPackService.forVertical('labour')`
 returns `null` and every Layer-4 feature is silently absent. Do not create a
@@ -282,8 +314,17 @@ Optional: `description`, `country`, `extends`, `regulators`, `roles`,
    with no expiry date.
 4. **Bump the `version`.** Packs only upgrade on a strictly greater version;
    otherwise the loader reports `up-to-date` and writes nothing.
-5. **`metadata` is a strict object.** The overlays' `alertRulesReview` and
-   `workflowConditions` prose is silently discarded before storage.
+5. **`metadata` strips unknown keys — but the three caveat keys now survive.**
+   *Corrected 2026-09-10; the previous wording said `alertRulesReview` and
+   `workflowConditions` were "silently discarded before storage" and that is no
+   longer true.* `MetadataSchema` (`packages/config-packs/_schema/pack.schema.ts:908`)
+   declares `author`, `lastReviewedAt`, `regulatoryReference`, **`alertRulesReview`**,
+   **`workflowConditions`** and **`statutoryConstraints`**, and the loader persists the
+   whole object (`config-pack-loader.service.ts:470`, `metadata: def.metadata ?? {}`).
+   Anything *outside* those six keys is still dropped without a word — it is a plain
+   `z.object`, which strips rather than throws, so a typo'd key fails silently and
+   looks like it worked. **Verify a metadata edit by loading the pack, not by reading
+   the file back.**
 
 > **The vertical bases are not country-neutral.** `grc.json` carries
 > `compliance.dataResidency: "AE"`, CBUAE frameworks, a `help.governancex.com/uae`
@@ -447,11 +488,40 @@ not happen.
 
 > **RLS isolates tenants, not users inside a tenant.** Every resource a
 > `client`-role token can reach needs its own user-scoping check **in the service,
-> not the controller**. This has been missed four times — `/crm/entities`,
-> `/payments`, `/communications/threads` (fixed; see below), and **`/tasks`**,
-> found by Anton 2026-09-05: `task.service.ts` filters only on `tenantId`, no
-> `@Roles` anywhere on `task.controller.ts`, so a `client`-role JWT reads every
-> task in the tenant. Fix tracked as Luke E-8, per ADR 0007.
+> not the controller**. This has now been missed **five** times:
+>
+> | # | Surface | Found | State |
+> |---|---|---|---|
+> | 1 | `/crm/entities` | — | fixed |
+> | 2 | `/payments` | — | fixed |
+> | 3 | `/communications/threads` | — | fixed — see the correction below |
+> | 4 | `/documents` (`DocumentHubService.canAccessDocument` → `return true`) | 2026-08-22 | fixed |
+> | 5 | **`POST /documents/generate/:templateKey`** | **2026-09-10** | **fixed, uncommitted** |
+>
+> *(`/tasks` was a sixth candidate, found by Anton 2026-09-05 and **since closed** —
+> `task.controller.ts` carries `@UseGuards(AuthGuard('jwt'), PolicyGuard)` and
+> `task.service.ts` applies own-scope via `scopeOf`. Do not re-open it; that stale row sent
+> three agents to re-verify a closed finding.)*
+>
+> **Instance 5 was live on production and is the sharpest one yet.**
+> `document-generation.service.ts` took an `entityId` straight from the query string and
+> filtered only `{ id: entityId, tenantId }`. A `client`-role token could name **any** record
+> id in its own tenant and receive a **rendered PDF** — another applicant's name, their fee
+> schedule and their full payment history, formatted by the firm's own cost-agreement
+> template. Not a JSON leak a UI might swallow: a document, ready to read.
+>
+> Fixed by `await this.access.assertOwnsEntity(tenantId, entityId, actor)` at
+> `document-generation.service.ts:278`, before the entity is loaded — the same
+> `DocumentAccessService` predicate `DocumentChecklistService.forEntity` and
+> `DocumentsService.upload/.create` already used, and 404-not-403 on refusal, because
+> confirming a real-but-foreign id exists is itself a disclosure. Spec:
+> `src/documents/document-generation-authz.spec.ts`.
+>
+> **The pattern recurring is the point.** Four of the five were the *same* mistake: a service
+> trusting a caller-supplied id because the controller was authenticated and RLS had already
+> scoped the tenant. `DocumentAccessService` exists precisely so this has one answer — so the
+> test for any new route taking an `entityId`, `linkedEntityId` or `clientId` from a client is
+> "does it call `assertOwnsEntity`", not "does it filter on `tenantId`".
 >
 > **Correction to earlier prose (ADR 0005, 2026-09-05):** the workspace and
 > ImmiStack docs previously stated user-scoped communications threads were an
@@ -736,11 +806,12 @@ Other things that cost an afternoon:
   --frozen-lockfile` before debugging a type error.
 - **Demo tenants are `status: "trial"`, not `"active"`.** UI branching on
   `status === 'active'` renders the wrong state.
-- **These sibling folders are not this product:**
-  `~/Documents/GitHub/immistack` (a standalone Next.js prototype),
-  `~/Documents/GitHub/immistack-` (the marketing site's own clone), and
-  `~/Documents/GitHub/opal` (`opal-consulting`, a client marketing site).
-  Do not develop in them.
+- **These sibling folders are not this product** *(re-checked 2026-09-10)*:
+  `~/Documents/GitHub/immistack` (a standalone Next.js prototype) and
+  `~/Documents/GitHub/opal` (`opal-consulting`, a client marketing site) — both still
+  present, neither is this codebase, do not develop in them.
+  `~/Documents/GitHub/immistack-` (the marketing site's own clone) **is gone**, as is
+  **`~/Documents/GitHub/meru`** — see §16, 2026-09-10. There is one tree: `~/dev/meru`.
 - **`~/Documents/immistack/` is a superseded ZIP snapshot — do not read or scope from it.**
   `backend/meru-core-main/` and `meru-core-fe-main/` are GitHub "Download ZIP" extractions
   (no `.git`, sitting beside their own `.zip` files, uniform `rwxr-xr-x` permissions, one
@@ -835,12 +906,23 @@ Other things that cost an afternoon:
   a subagent that did not use `timeout` found the truth. Never wrap a grep in it here;
   when an empty result is load-bearing, `echo "EXIT=$?"` and check for `0`, not `127`.
   `gtimeout` from coreutils would work; it is not installed.
-- **Jest cannot run on this host.** It forks a worker pool and gets starved: measured
-  2026-09-07 at **0.44s of CPU across 14 minutes** at 0.0%, and `--runInBand` fared no
-  better. Plain single-process node scripts (`check:cjs`, `check-claims.mjs`) run fine,
-  and `tsc` on the small Vite marketing project completes — it is the heavy, forking
-  work that dies. **Vercel's remote build is the gate that actually works** here; it
-  compiles, it does not run tests.
+- **Jest runs fine. The claim that it "cannot run on this host" was false and is struck.**
+  *(Struck 2026-09-10. It had already been closed in §16 on 2026-09-08 while this bullet still
+  asserted the opposite — two sections of one file disagreeing is how a stale blocker survives.)*
+
+  From `~/dev/meru/meru-core`, `npm test` is **77 suites / 953 tests, all green, in ~9
+  seconds** (measured 2026-09-10 04:06). That figure moved three times in twenty minutes —
+  75/925 → 76/938 → 77/953 — because another agent was writing specs into the tree while it was
+  being measured. **Re-run it; do not quote this number**, and if a count disagrees with this
+  line, the count is right and this line is old. The starvation measured on 2026-09-07 — 0.44s of CPU across
+  14 minutes, `--runInBand` no better — was **entirely** the iCloud trap described above: jest
+  forks a worker pool and every worker's file reads queued behind `bird` on a full sync root.
+  Moving the tree out of `~/Documents` fixed it outright; nothing about jest changed.
+
+  **This one cost real work.** Believing the test gate was unavailable is why "Vercel's remote
+  build is the only gate that works" was written into this file, and a remote build compiles —
+  it does not test. The first `npm test` after the move immediately failed 10 specs nobody
+  could see. **`npm test` is a required gate again. Run it.**
 
 ---
 
@@ -889,7 +971,7 @@ in the owning repo's docs with detail.
 | **No tenant-domain resolution.** | **FIXED 2026-08-22.** Public `GET /tenants/resolve?host=` → `{slug, name, vertical, logoUrl, branding.colors, matchedBy}` or 404. `<slug>.<BASE_DOMAIN>` by slug (reserved labels excluded), otherwise exact match on `settings.branding.customDomain`. Nothing else is returned to an anonymous caller. |
 | **ImmiStack hardcodes its navigation** | **FIXED** — `immistack/lib/api/services/navigation.service.ts` renders from `GET /config-packs/me/navigation`, old list kept as an honest fallback. |
 | **Tokens lived in `localStorage`** in all three product apps; GovX stored them **twice** | **FIXED 2026-08-22** — httpOnly session cookie via `lib/api/session-cookie.server.ts` in each app. |
-| **`/api-json` census** | **274 paths / 326 operations**, verified 2026-09-08 (was 273/325 on 2026-09-05 — `auth` -1 for the removed `/auth/register`, `alerts` +2, new prefix). Any doc still quoting 248/257/262/272/273 predates this pass. |
+| **`/api-json` census** | **278 paths / 331 operations** on the deployed API, verified 2026-09-10 (274/326 on 2026-09-08; 273/325 on 2026-09-05). The `alerts` prefix is **traced**: `src/rules/alert-rule.controller.ts:53`, `@Controller('alerts')` under `@ApiTags('rules')` — prefix and tag differ, which is why a tag search missed it. Uncommitted local work is **not** in this count (`POST /tenants/invitations` is absent from the live spec). Any doc quoting 248/257/262/272/273/274 predates this pass. |
 
 ### 2026-09-05 — fixes landed and findings still open
 
@@ -946,8 +1028,95 @@ Still open, found today, not yet fixed:
 | ~~`GET /health/capabilities` role check is inert~~ | **FIXED — on `main`, verified 2026-09-07** | `health.controller.ts` now carries `@UseGuards(PolicyGuard)` alongside `@Roles(PlatformRole.PLATFORM_ADMIN)`, which is ADR 0007 D4's end state, not the interim in-handler check. The earlier caution — that `HealthModule` would have to import `IamModule` — was wrong: `CoreModule` is `@Global()` and exports `VerticalPolicyService`, so `PolicyGuard` resolves anywhere, as `TasksModule` already demonstrates. |
 | ~~`TaskService.getTask` has no `tenantId` filter~~ | **FIXED — verified 2026-09-07** | `findTaskOrThrow` filters `{ id, tenantId }` (`task.service.ts:84-96`) and `getTask` goes through it. |
 | ~~`capabilities.service.ts` checks `UK_HOMEOFFICE_CLIENT_ID`; the adapter reads `UKVI_*`~~ | **FIXED 2026-09-07 — and it was 7 of 8 rows, not 1** | Checking the other seven found the same class in six more. `sa-sama`, `qa-central-bank` and `bh-central-bank` required a `*_API_KEY` no adapter reads (all three use `*_CLIENT_ID` + `*_CLIENT_SECRET`); `au-home-affairs`, `ca-ircc` and `nz-immigration` required the client id but **not the secret**, while `credentialsPresent` needs both — so setting only the id made the report say `live` about a connector still running **sandboxed**, which is the §7.3 failure exactly. Only `ae-cbuae` was correct. Unreachable from behaviour (with nothing set, every adapter reads `unconfigured` whichever variable is named), so the fix ships with `capabilities-regulators.spec.ts`, which parses each adapter's own `credentialsPresent` expression and fails on divergence — proven to fail when the original UK row is reintroduced. |
-| ~~`npm test` and `rls:verify` never run on this host~~ | **BOTH CLOSED 2026-09-08** | `npm test` runs in seconds from `~/dev/meru` (**63 suites / 849 tests green**); it immediately caught 10 failing tests nobody could see, where two specs still mocked the CRM repo as `find({ where: { assignedTo } })` after `ownedEntityIds` was rewritten to build a query. **Tenant isolation is now PROVEN, not merely configured:** `BASE_URL=https://meru-core.vercel.app bash scripts/smoke/cross-tenant.sh` → **10 passed, 0 failed** against production — two real tenants, neither able to list, fetch by id, or read stats across the boundary. Verified alongside it: `DATABASE_APP_URL` **is** set on Vercel Production (43 days), and `meru_app` holds `rolbypassrls=false` — so production genuinely runs under the RLS-enforcing role, and RLS is not inert. `rls:verify` still cannot run *locally* (the local `.env` has `DATABASE_APP_URL=""`), and **do not "fix" that by running `scripts/provision-rls-role.js`: it `ALTER`s `meru_app`'s password and would break production until Vercel's variable was updated by hand.** The HTTP proof is the correct route and needs no secret. One check remains skipped — intra-tenant client-to-client isolation — because no route returns an invite acceptance token to a script (ADR 0006); that is a *tooling* gap, not an isolation finding. |
+| ~~`npm test` and `rls:verify` never run on this host~~ | **BOTH CLOSED 2026-09-08; test count re-measured 2026-09-10** | `npm test` runs in seconds from `~/dev/meru` — **77 suites / 953 tests green in ~9s** at 2026-09-10 04:06, up from 63/849 on 2026-09-08. The count moved 75/925 → 76/938 → 77/953 within twenty minutes while another agent added specs; re-run rather than quoting it. §14's "Jest cannot run on this host" bullet contradicted this row for two days and has now been struck. It immediately caught 10 failing tests nobody could see, where two specs still mocked the CRM repo as `find({ where: { assignedTo } })` after `ownedEntityIds` was rewritten to build a query. **Tenant isolation is now PROVEN, not merely configured:** `BASE_URL=https://meru-core.vercel.app bash scripts/smoke/cross-tenant.sh` → **10 passed, 0 failed** against production — two real tenants, neither able to list, fetch by id, or read stats across the boundary. Verified alongside it: `DATABASE_APP_URL` **is** set on Vercel Production (43 days), and `meru_app` holds `rolbypassrls=false` — so production genuinely runs under the RLS-enforcing role, and RLS is not inert. `rls:verify` still cannot run *locally* (the local `.env` has `DATABASE_APP_URL=""`), and **do not "fix" that by running `scripts/provision-rls-role.js`: it `ALTER`s `meru_app`'s password and would break production until Vercel's variable was updated by hand.** The HTTP proof is the correct route and needs no secret. One check remains skipped — intra-tenant client-to-client isolation — because no route returns an invite acceptance token to a script (ADR 0006); that is a *tooling* gap, not an isolation finding. |
 | Two `sweep-pilot-*` tenants left `suspended`, no delete route | Owen (CRUD suite) | `TenantProvisioningService.deleteTenant` exists, unwired, with an incomplete hard-purge branch. Needs wiring before pilot tenants can be cleaned up. |
 | Client-thread cross-client isolation **untested**, not unsound | Owen (CRUD suite) | The code is right per ADR 0005. **`RESEND_API_KEY` and `RESEND_FROM` are now set** (confirmed 2026-09-08) — the blocker on creating staff/client accounts via the invite flow to prove this live is gone. Test is still not run; this is now the top priority, not blocked on a credential. |
 | Dependency advisories | **multer FIXED 2026-09-07**, rest open | `multer` bumped 1.4.5-lts.2 → **2.0.2** and it is now the only version in the tree; `check:cjs` passes with it (52 packages, no ESM-only dep — the gate that has caught `uuid` and `otplib` before). Still open: `@nestjs/core@11.1.12`, `typeorm@0.3.28`, and the 17 Dependabot alerts on the marketing repo. **Correction: `axios` is not a dependency of `meru-core`** — absent from `package.json` and the lockfile; that finding belongs to the frontend repos. |
 | Sweep account **passwords** were committed in-repo | **Partly fixed 2026-09-07** | Passwords now read from env and `tools/sweep/lib.mjs:28-38` throws if unset; the three **emails** are still hardcoded at `:36-38`, which is fine. What remains open is the operator action: the historical passwords are still in git history and have **not been rotated on production**, and one of the three accounts is `platform_admin`. |
+
+### 2026-09-10 — the workspace became one tree, and two authz defects closed
+
+**All three of these are UNCOMMITTED working-tree changes** in `meru-core` and `meru-core-fe`
+(both on `main`). Nothing below is deployed. `/api-json` on production still shows the
+pre-fix surface — see the census row above.
+
+#### One tree, and only one
+
+`~/dev/meru` is the authoritative workspace and the **only** copy. Deleted 2026-09-09/10:
+
+| Deleted | Was |
+|---|---|
+| `~/Documents/GitHub/meru` | stale, on a full iCloud Drive, actively corrupting (`.git/refs/heads/main 3.lock`, `.vercel/project 2.json`) |
+| `~/dev/meru-core`, `~/dev/meru-core-fe` | ancient standalone clones, last touched 2026-08-21 |
+
+`~/dev/meru` was 28 commits ahead of the iCloud copy on `meru-core` and 17 ahead on
+`meru-core-fe`. **Any doc still describing three trees, or telling a reader to work in
+`~/Documents/GitHub/meru`, or describing the move out of iCloud as pending, is wrong** — the
+move happened on 2026-09-07 and the stale copies are gone.
+
+Eight files existed only in the deleted trees and were preserved verbatim, **not wired in**, at
+`~/dev/meru/_salvage/`. **Read `_salvage/README.md` before touching any of it** — the affiliate
+page is deliberately unregistered pending an s.34 conflict disclosure (PRD FR-14.4 / BRD BR-4)
+and the marketing build's `check-claims.mjs` gate independently rejects it, and the recovered
+E-8 migration sorts *after* one that did not exist in the worktree it came from.
+
+#### A live cross-tenant-user data leak on `POST /documents/generate/:templateKey`
+
+**Fifth instance of the within-tenant isolation class. Full detail in §8**, which is the list
+that should be read as a pattern rather than as five separate rows.
+
+A `client`-role token could pass any `entityId` in its own tenant and receive a **rendered PDF**
+carrying another applicant's name, fees and payment history. Closed with
+`DocumentAccessService.assertOwnsEntity` at `document-generation.service.ts:278`, checked before
+the entity is loaded, 404-not-403 on refusal. Spec: `src/documents/document-generation-authz.spec.ts`.
+
+#### DEF-1 — unauthenticated tenant provisioning on production
+
+`POST /tenants/signup` was `@Public()` and **worked**: an anonymous request created a TRIAL
+tenant *and* a `firm_admin` login with a caller-supplied password. Same defect class as
+`POST /auth/register`, which was removed on 2026-09-04 — one controller over, missed.
+
+Now gated by a single-use, expiring `TenantSignupInvite`, minted **`platform_admin`-only** via
+`POST /tenants/invitations` (`runAsGod` + `CRITICAL` audit entry, since no target tenant exists
+yet to attribute the write to). The invite is bound to an email and may pin
+`allowedSlug`/`allowedVertical`/`allowedPlan`; a redemption disagreeing with a pinned value is
+refused. Only the SHA-256 digest of the token is stored, never the token — the same discipline
+as `AuthToken` and `sessions.refreshTokenHash`.
+
+**Migration `1756800000000-AddTenantSignupInvites`, rollback read before writing this:** `down()`
+is `DROP TABLE IF EXISTS "tenant_signup_invites"`. Reversible with no data loss, because the
+table is new — the reverse destroys only invites minted after the forward ran. Registered in
+**both** `ALL_MIGRATIONS` (`src/config/migrations.ts`) and `ALL_ENTITIES` (`src/config/entities.ts`)
+in the same change, which is the fifth time this file has had to care: "migration on disk, missing
+from `ALL_MIGRATIONS`" has now been a real production bug four times.
+
+> **This changes an onboarding path, so deploying it is a release decision, not just a deploy.**
+> After it ships, every route to a new workspace runs through a `platform_admin`. Confirm the
+> operator has minted invites for any pending signups *before* the deploy, not after.
+
+#### Stage vocabulary: the client portal told every applicant they were at "Enquiry received"
+
+Frontend, `immistack/lib/workflow/client-journey.ts`. `ImmigrationCase.current_stage` read
+`verticalAttributes.stage` / `.case`, and **no live path has ever written either** — the only
+entity-creation path, `NewMatterDialog`, writes `verticalAttributes.matter.stage`. So the field
+fell through to its `"lead"` default for every record, and the client portal reported
+"Enquiry received" permanently — to applicants whose visa had been **granted**, and to applicants
+who had been **refused**.
+
+Fixed with an explicit total mapping, `caseStageFromMatter`, from the staff `StageKey` vocabulary
+to the client `case` vocabulary. `decision` and `closed` are deliberately `null` in the table and
+resolved by the outcome instead: a recorded refusal is decisive at any stage; a grant requires
+`closed` **and** no refusal — the same contract as the staff dashboard, not a second opinion.
+`null` means "cannot say" and must render as unknown, never as a stage and never as `"lead"`.
+
+> **The lesson, which outlives the fix: §7.3 could not have caught this.**
+> §7.3 guards against *unknown data rendered as a positive result*, and the honest
+> "this portal does not recognise that stage" fallback in `app/client/application/page.tsx`
+> was already written and correct. It never fired, because **`"lead"` is a valid stage.**
+> The data was wrong, not malformed. A shape check cannot catch a plausible wrong value, and a
+> default that looks like real data defeats every guard that only inspects shape.
+>
+> Add to §7.3's habits: **a default value on a field sourced from a backend is a claim.**
+> If nothing writes the field, the default is what every user sees, and it will be a confident
+> sentence about their case. Prefer a default of `null`-and-render-unknown over a plausible
+> starting value.

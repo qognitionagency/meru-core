@@ -10,6 +10,7 @@ import { Session } from '../iam/entities/session.entity';
 import { AuthToken } from '../iam/entities/auth-token.entity';
 import { ApiKey } from '../iam/entities/api-key.entity';
 import { TenantConfigPin } from '../iam/entities/tenant-config-pin.entity';
+import { TenantSignupInvite } from '../iam/entities/tenant-signup-invite.entity';
 import { ConfigPack } from '../tenant/entities/config-pack.entity';
 import { FeatureFlag } from '../tenant/entities/feature-flag.entity';
 import { IntegrationAdapter } from '../integrations/entities/integration-adapter.entity';
@@ -47,6 +48,7 @@ import { SequenceEnrolment } from '../notifications/entities/sequence-enrolment.
 import { InboundWebhookEndpoint } from '../webhooks/entities/inbound-webhook-endpoint.entity';
 import { InboundWebhookEvent } from '../webhooks/entities/inbound-webhook-event.entity';
 import { EntityRelation } from '../crm/entities/entity-relation.entity';
+import { TenantRecordCounter } from '../crm/entities/tenant-record-counter.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import {
   Notification,
@@ -86,12 +88,17 @@ export const ALL_ENTITIES = [
   AuthToken,
   ApiKey,
   TenantConfigPin,
+  TenantSignupInvite,
   TenantSetting,
   // Config
   ConfigPack,
   FeatureFlag,
   // CRM
   UniversalEntity,
+  // ADR 0010's per-tenant number counter. Never read through a repository —
+  // see the entity's own header — but the schema catalogue must carry it or
+  // the govx/immistack DataSources create a database without the table.
+  TenantRecordCounter,
   // Integrations
   IntegrationAdapter,
   VesselPosition,

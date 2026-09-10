@@ -21,6 +21,7 @@ import { Document } from './entities/document.entity';
 import { VerticalPackModule } from '../tenant/vertical-pack.module';
 import { DocumentChecklistService } from './document-checklist.service';
 import { DocumentGenerationService } from './document-generation.service';
+import { DocumentRequestService } from './document-request.service';
 import { DocumentVersion } from './entities/document-version.entity';
 import { DocumentMetadata } from './entities/document-metadata.entity';
 import { User } from '../iam/entities/user.entity';
@@ -34,6 +35,7 @@ import { UniversalEntity } from '../crm/entities/universal-entity.entity';
 import { Payment } from '../billing/entities/payment.entity';
 import { Tenant } from '../iam/entities/tenant.entity';
 import { RuleEvaluatorModule } from '../rules/rule-evaluator.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -82,6 +84,11 @@ import { RuleEvaluatorModule } from '../rules/rule-evaluator.module';
     // NotificationsModule and TasksModule in behind one JSON predicate — the
     // import cycle its own header warns about.
     RuleEvaluatorModule,
+    // COM, for the one message this module can send: the pack template that
+    // asks a client for their outstanding documents. Safe in this direction —
+    // NotificationsModule imports neither DocumentsModule nor anything that
+    // does, so there is no cycle to forwardRef around.
+    NotificationsModule,
   ],
   controllers: [DocumentsController],
   providers: [
@@ -97,9 +104,13 @@ import { RuleEvaluatorModule } from '../rules/rule-evaluator.module';
     DocumentHubService,
     DocumentChecklistService,
     DocumentGenerationService,
+    // Writes `documentsRequestedAt` / `documentsReceivedAt` — the fields the
+    // pack's document chase is authored against and which nothing wrote.
+    DocumentRequestService,
   ],
   exports: [
     DocumentsService,
+    DocumentRequestService,
     DocumentHubService,
     DocumentGenerationService,
     // Exported so the document hub and any future consumer share one

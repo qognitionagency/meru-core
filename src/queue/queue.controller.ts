@@ -23,11 +23,11 @@ import {
 import { QueueService } from './queue.service';
 import { CurrentUser } from '../iam/decorators/current-user.decorator';
 import { TenantId } from '../tenant/decorators/tenant-id.decorator';
-import { JwtAuthGuard } from '../iam/guards/jwt-auth.guard';
 import { PolicyGuard } from '../iam/guards/policy.guard';
 import { Roles } from '../iam/decorators/roles.decorator';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
 import { UseGuards } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import {
   CreateJobDto,
   ScheduleJobDto,
@@ -54,7 +54,7 @@ import {
 // document), so the class is staff-only rather than narrowed per-route.
 @ApiTags('Queue')
 @ApiBearerAuth('JWT-auth')
-@UseGuards(JwtAuthGuard, PolicyGuard)
+@UseGuards(AuthGuard('jwt'), PolicyGuard)
 @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
 @Controller('queue')
 export class QueueController {

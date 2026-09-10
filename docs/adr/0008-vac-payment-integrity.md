@@ -716,4 +716,4 @@ Per change, in the order they would be undone.
 | 2 | `[UNVERIFIED]` Does `CommentService` (`src/crm/comment.service.ts:61`) write an `audit_logs` entry? Determines whether D2's dismissal needs `audited: true` | Luke |
 | 3 | Fix the false comment at `meru-core-fe/immistack/lib/api/services/matters.service.ts:127-130` — `verticalAttributes` deep-merges (`src/crm/crm.service.ts:368`) | Mira |
 | 4 | Confirm the brand list for `vacCardAuthority.brand` before authoring the pack template | Product |
-| 5 | Correct workspace `CLAUDE.md` §5: `au-immigration.json` is **2.4.0** on disk, the table says 2.3.0 | Jonas |
+| 5 | ~~Correct workspace `CLAUDE.md` §5: `au-immigration.json` is **2.4.0** on disk, the table says 2.3.0~~ | **DONE 2026-09-10 (Jonas).** Every pack version in §5 was re-read from disk, not just AU. The drift was wider than this row: base `immigration.json` **2.3.0 → 2.6.0**, `au` **2.4.0 → 2.8.1**, and `ca`/`uk`/`nz` **2.2.0 → 2.4.0**. |

@@ -5,6 +5,14 @@ implementation begins — this ADR touches auth, per this repo's `definition-of-
 ("Any change to auth, tenancy, the data model, or a third-party integration" requires
 security-auditor review) — and by `quality` (Owen) before anything merges.
 
+> **Read [ADR 0012](0012-better-auth-adoption.md) alongside this one (added 2026-09-10).** It
+> answers the adjacent question — adopting **Better Auth directly, self-hosted** — and declines
+> replacement, keeping this ADR's D1 federation shape. It also **corrects §1.1 below on two
+> points**: custom JWT claims (`definePayload`) and SAML 2.0 (SSO plugin) *are* supported by
+> Better Auth itself. The gaps recorded in §1.1 are properties of Neon's **managed** wrapper, not
+> of the underlying library. D1's reasoning is unaffected — it rests on RLS binding, impersonation
+> and role resolution staying in this codebase, not on the vendor's claim support.
+
 **Scope:** whether and how to federate identity to Neon Auth after ImmiStack's first pilot,
 per the operator's standing decision ("launch on the current IAM, migrate to Neon Auth after
 the first pilot"). This ADR does not implement the migration; it decides the shape so Luke is

@@ -690,7 +690,8 @@ workspace `CLAUDE.md` §14; the one-line check is
 **Verified 2026-09-07, from `~/dev/meru`, on `main` after the merge:**
 `pnpm install --frozen-lockfile` **3.6 s** · `npm run build` (`nest build`)
 **clean, 8.7 s** · `npm run check:cjs` **clean, 52 packages, no ESM-only deps** ·
-`npm test` **56 suites / 789 tests, all pass, 4 s**.
+`npm test` **56 suites / 789 tests, all pass, 4 s**. *(Re-measured 2026-09-10 on `02b290a`
+plus the uncommitted work in `AGENTS.md` §0: **75 suites / 925 tests, all pass, ~5–9 s**.)*
 
 Ten of those tests were failing when `main` was first merged, and had been
 invisible because Jest could not be scheduled on this host at all: both
@@ -710,18 +711,70 @@ Two gates need environment rather than code:
 
 ### Open
 
+- [x] **Client and case numbering (ADR 0010, FR-4.10/FR-5.4).** One generic
+      `UniversalEntity.recordNumber` — `CL-000001` for `person`/`organization`,
+      `CS-000001` for `case`, unique per tenant, never reused. The counter is
+      `tenant_record_counters` (ENABLE + FORCE RLS) advanced by a single
+      `INSERT … ON CONFLICT … DO UPDATE … RETURNING`, inside the same
+      `QueryRunner` transaction as the entity insert. **Not** `count()+1`:
+      `BillingService.generateInvoiceNumber` (`billing.service.ts:626-630`)
+      still has that race and is a separate ticket — do not copy it, and do not
+      assume it has been fixed. `src/crm/record-identity.ts` is the one copy of
+      the SQL; `createEntity`, `convertEntity` (lead→client only) and
+      `ImportService.commit` all use it. Concurrency test in
+      `src/crm/record-numbering.spec.ts`.
+- [x] **Record-identity contract (ADR 0011, FR-4.9), server half.**
+      `ConfigPackLoaderService.unnamedSubjectMappings` rejects, at pack LOAD, any
+      `importMappings[]` entry targeting `person`/`organization`/`lead` that maps
+      nothing to `firstName`/`lastName`/`email` — the `danglingStepReferences`
+      shape and the same failure direction. `vendor` is deliberately out of scope
+      (a GovX vendor is a company with a legal name). **Core never derives a name
+      from `verticalAttributes`, on any path** — that is the load-bearing negative
+      guarantee, and `convertEntity` must not "helpfully" acquire it. The
+      search-index title chain is now name → `recordNumber` → email → phone →
+      `'Unknown'`. The frontend half (leads.service.ts's promoted-column lift, and
+      the ten "Unnamed client" render sites) is Mira's and is **not** done here.
+- [x] **Practitioner credential (FR-1.2).** `users.practitionerCredential` +
+      `practitionerCredentialType`, a pair enforced by a CHECK constraint, wired
+      through `InviteUserDto`, `UpdateUserDto` (admin-only) and `DirectoryUser`.
+      Neither column is named `marn` — the registry is a value from the vertical,
+      not vocabulary in core. `practitionerCredentialVerified` is sent as an
+      explicit `false`: the number is self-asserted and nothing checks it against
+      OMARA/OISC/CICC. **Sign-off enforcement is NOT built** — see the item below.
+- [ ] **Sign-off enforcement (FR-1.2, second half).** Storing the credential is
+      done; "only a credentialed user may sign off advice or lodgement" is not.
+      It needs ADR 0001 §7's chain end to end, none of which exists yet:
+      `requiresSignOff`/`signOffRole` on `WorkflowStepSchema` (+ `packs:schema`),
+      `PackWorkflowService.materialise` writing `permissions.signOffRole`, a gate
+      in `WorkflowEngineService.executeTransition`, and `signedOffBy` on
+      `WorkflowInstance.history[]`. ADR 0001's `User.verticalRoles` carrier is
+      **also still unbuilt** (no such column), so there is currently no practice
+      role for a gate to check either. Do not report FR-1.2 as complete.
 - [x] **Capability report.** `src/health/capabilities.service.ts`,
       `GET /health/capabilities` (platform_admin), counts-only summary on the
       public `/health`, 8 unit tests. **Built, tested and route-mapped.**
-- [ ] **`ModuleCode` + `@RequiresModule` + 402 `MER-ENT-0001`.** Neither symbol
-      exists today; entitlement codes are plain strings in
-      `tenant-provisioning.service.ts:48-75`. This is the change §5.5b is about —
-      additive only, old codes keep resolving, GRC routes only, migration
-      reversible and **verified against an immigration tenant before it runs**.
+- [x] **`ModuleCode` + `@RequiresModule` + a 402.** *Shipped — this item said
+      "neither symbol exists today" and both have existed since 2026-08-22.*
+      `src/iam/entitlements/` holds `module-code.ts` (`ModuleCode`,
+      `CORE_MODULE_CODES`, `GRC_MODULE_CODES`), `requires-module.decorator.ts` and
+      `module-entitlement.guard.ts`. **The error code is `MER-TENANT-0006`**
+      (`src/common/types.ts:74`, `TENANT_MODULE_NOT_ENTITLED`), **not** the
+      `MER-ENT-0001` this line predicted — use the real one. Applied to GRC routes
+      only; a grant listing no GRC code predates the vocabulary and passes ungated,
+      logged. Verified 2026-09-10.
 - [ ] Seed the price book · monitored-entity meter (snapshot, never increment) ·
-      GRC pack module gating + `screening.monitoredTypes[]` · workflow JsonLogic
-      conditions. (XLSX import is done: `exceljs`, same pipeline, `check:cjs`
-      clean — `POST /integrations/import/:key` takes `xlsx` as base64.)
+      GRC pack module gating + `screening.monitoredTypes[]`. (XLSX import is done:
+      `exceljs`, same pipeline, `check:cjs` clean — `POST /integrations/import/:key`
+      takes `xlsx` as base64.)
+      **"Workflow JsonLogic conditions" was struck from this list on 2026-09-10 —
+      it shipped.** `compileCondition` (`src/workflow/services/pack-condition.ts:52`)
+      compiles a pack's `transitions[].condition` — `<path> <op> <literal>`,
+      `in [...]`, `not in [...]`, or a JsonLogic object, **no eval** — and
+      `pack-workflow.service.ts:171` calls it for every transition at materialisation.
+      All four conditions in the AU overlay were verified compiling on 2026-09-10.
+      One that fails to compile is stored as `conditions.unevaluable`, logged as an
+      error, and that transition **never opens** — a visible authoring error, never a
+      silent allow.
 - [x] `sar` is an `EntityType` (migration `AddSarEntityType`, workable). The
       GovX pack still needs an `entityTypes[]` entry for it — pack authoring,
       separate commit — before the SAR page renders labels and fields.

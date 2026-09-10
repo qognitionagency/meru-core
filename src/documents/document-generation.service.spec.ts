@@ -5,6 +5,13 @@ import {
   substitute,
   type DocumentTemplate,
 } from './document-generation.service';
+import type { Actor } from '../common/access';
+
+// Staff has unrestricted ('tenant') scope in DocumentAccessService, so it
+// exercises `generate()` the way every test in this file did before actor
+// scoping existed. Actor-refusal behaviour has its own file,
+// document-generation-authz.spec.ts.
+const STAFF: Actor = { id: 'staff-1', roles: ['staff'] };
 
 /**
  * Document generation is the frontend's #1 blocker: four lifecycle stages cannot
@@ -90,6 +97,9 @@ describe('DocumentGenerationService', () => {
       findOne: jest.fn().mockResolvedValue({ name: 'Acme Migration', slug: 'acme' }),
     };
     const documents = { upload: jest.fn().mockResolvedValue({ document: { id: 'doc-1' } }) };
+    // Real access checks are exercised in document-generation-authz.spec.ts;
+    // this file is about rendering, so the actor always owns the record.
+    const access = { assertOwnsEntity: jest.fn().mockResolvedValue(undefined) };
 
     const service = new DocumentGenerationService(
       packs as any,
@@ -97,13 +107,14 @@ describe('DocumentGenerationService', () => {
       paymentRepo as any,
       tenantRepo as any,
       documents as any,
+      access as any,
     );
     return { service, packs, documents, entityRepo };
   };
 
   it('produces a real, parseable PDF', async () => {
     const { service } = build();
-    const out = await service.generate('t1', 'immigration', 'cost_agreement', 'e1');
+    const out = await service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1');
 
     expect(out.mimeType).toBe('application/pdf');
     // Parse it back rather than trusting the byte count — a truncated or
@@ -118,14 +129,14 @@ describe('DocumentGenerationService', () => {
     // `requires` says that is not acceptable for this document.
     const { service } = build({ payments: [] });
     await expect(
-      service.generate('t1', 'immigration', 'cost_agreement', 'e1'),
+      service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1'),
     ).rejects.toThrow(/paymentsTotal/);
   });
 
   it('does not name a value that is present', async () => {
     const { service } = build({ payments: [] });
     await expect(
-      service.generate('t1', 'immigration', 'cost_agreement', 'e1'),
+      service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1'),
     ).rejects.not.toThrow(/client\.fullName/);
   });
 
@@ -141,7 +152,7 @@ describe('DocumentGenerationService', () => {
         },
       ],
     });
-    const out = await service.generate('t1', 'immigration', 'letter', 'e1');
+    const out = await service.generate('t1', 'immigration', 'letter', STAFF, 'e1');
 
     // A client reads this document; literal `{{...}}` in it is embarrassing, and
     // a silent blank is how a template drifts from its pack unnoticed.
@@ -151,20 +162,20 @@ describe('DocumentGenerationService', () => {
   it('404s on a template the pack does not declare', async () => {
     const { service } = build();
     await expect(
-      service.generate('t1', 'immigration', 'not_a_template', 'e1'),
+      service.generate('t1', 'immigration', 'not_a_template', STAFF, 'e1'),
     ).rejects.toThrow(/No document template/);
   });
 
   it('404s when the entity is not this tenant\'s', async () => {
     const { service } = build({ entity: null });
     await expect(
-      service.generate('t1', 'immigration', 'cost_agreement', 'e1'),
+      service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1'),
     ).rejects.toThrow(/Entity not found/);
   });
 
   it('names the file from the record, and sanitises it', async () => {
     const { service } = build();
-    const out = await service.generate('t1', 'immigration', 'cost_agreement', 'e1');
+    const out = await service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1');
     expect(out.fileName).toBe('cost-agreement-Sharma.pdf');
   });
 
@@ -186,7 +197,7 @@ describe('DocumentGenerationService', () => {
         },
       ],
     });
-    const out = await service.generate('t1', 'immigration', 'f', 'e1');
+    const out = await service.generate('t1', 'immigration', 'f', STAFF, 'e1');
     expect(out.fileName).not.toMatch(/[/\\]/);
   });
 
@@ -201,7 +212,7 @@ describe('DocumentGenerationService', () => {
 
   it('files a stored document under the key the checklist matches on', async () => {
     const { service, documents } = build();
-    const out = await service.generate('t1', 'immigration', 'cost_agreement', 'e1');
+    const out = await service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1');
     await service.store(out, 't1', 'u1', 'e1');
 
     const dto = documents.upload.mock.calls[0][1];
@@ -230,7 +241,7 @@ describe('DocumentGenerationService', () => {
         },
       ],
     });
-    const out = await service.generate('t1', 'immigration', 'inv', 'e1');
+    const out = await service.generate('t1', 'immigration', 'inv', STAFF, 'e1');
     expect(out.bytes.length).toBeGreaterThan(0);
   });
 
@@ -247,7 +258,7 @@ describe('DocumentGenerationService', () => {
         },
       ],
     });
-    const out = await service.generate('t1', 'immigration', 'long', 'e1');
+    const out = await service.generate('t1', 'immigration', 'long', STAFF, 'e1');
     const parsed = await PDFDocument.load(out.bytes);
     expect(parsed.getPageCount()).toBeGreaterThan(1);
   });
@@ -272,13 +283,13 @@ describe('DocumentGenerationService', () => {
         },
       ],
     });
-    const out = await service.generate('t1', 'immigration', 'f', 'e1');
+    const out = await service.generate('t1', 'immigration', 'f', STAFF, 'e1');
     await expect(PDFDocument.load(out.bytes)).resolves.toBeDefined();
   });
 
   it('formats minor units as a human figure', async () => {
     const { service } = build();
-    const out = await service.generate('t1', 'immigration', 'cost_agreement', 'e1');
+    const out = await service.generate('t1', 'immigration', 'cost_agreement', STAFF, 'e1');
     // 350000 minor units is AUD 3500.00, not 350000.
     expect(out.unresolved).not.toContain('paymentsTotal');
   });

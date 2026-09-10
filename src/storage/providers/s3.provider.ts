@@ -43,11 +43,29 @@ export class S3StorageProvider implements ObjectStorageDriver {
       .get<string>('AWS_SECRET_ACCESS_KEY')
       ?.trim();
     const bucket = this.configService.get<string>('AWS_S3_BUCKET')?.trim();
+    /**
+     * S3-compatible endpoint override. Empty for real AWS.
+     *
+     * Supabase Storage, Cloudflare R2, Wasabi and MinIO all speak the S3 API
+     * but live on their own hosts, and without this the SDK silently resolves
+     * `s3.<region>.amazonaws.com` and authenticates a Supabase key pair against
+     * AWS — which fails as a credential error, not a configuration one, so the
+     * log says "invalid access key" and points nowhere near the real cause.
+     *
+     * `s3ForcePathStyle` is required with it: these services address buckets as
+     * `<endpoint>/<bucket>/<key>`, not `<bucket>.<endpoint>/<key>`, and the SDK
+     * defaults to the virtual-host form. `signatureVersion: v4` because none of
+     * them accept v2.
+     */
+    const endpoint = this.configService.get<string>('AWS_S3_ENDPOINT')?.trim();
     this.configured = !!(accessKeyId && secretAccessKey && bucket);
     this.s3 = new S3({
       accessKeyId,
       secretAccessKey,
       region: this.configService.get('AWS_REGION', 'us-east-1'),
+      ...(endpoint
+        ? { endpoint, s3ForcePathStyle: true, signatureVersion: 'v4' }
+        : {}),
     });
     this.bucket = bucket ?? '';
   }

@@ -75,6 +75,9 @@ describe('DocumentsService — presigned upload path', () => {
       // check itself is covered in documents-linked-entity-authz.spec.ts.
       {} as any,
       storage as any,
+      // Checklist bookkeeping after a document lands — no payload here links
+      // to an entity, so it is never reached.
+      { recordIntake: jest.fn() } as any,
     );
 
     return { service, storage, documentRepo, versionRepo, savedDocuments, savedVersions };

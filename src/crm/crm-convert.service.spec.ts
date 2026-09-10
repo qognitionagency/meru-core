@@ -18,6 +18,35 @@ import { PlatformRole } from '../iam/enums/platform-role.enum';
  */
 const STAFF_ACTOR = { id: 'staff-1', roles: [PlatformRole.FIRM_ADMIN] };
 
+/**
+ * A `DataSource` that runs `CrmService`'s transaction inline against the same
+ * in-memory repository stub the rest of the harness uses (ADR 0010 §2.2 gave
+ * `createEntity`/`convertEntity` a `QueryRunner`).
+ *
+ * The counter returns a monotonic value, so the numbers a test sees are the
+ * numbers the real upsert would issue. `rollbackTransaction` is recorded but
+ * does not unwind the stub — no test here asserts on rollback; the dedicated
+ * numbering spec does.
+ */
+function fakeDataSource(repo: { save: (e: any) => any }) {
+  let counter = 0;
+  return {
+    createQueryRunner: () => ({
+      connect: async () => undefined,
+      startTransaction: async () => undefined,
+      commitTransaction: async () => undefined,
+      rollbackTransaction: async () => undefined,
+      release: async () => undefined,
+      query: async () => [{ value: String(++counter) }],
+      manager: {
+        create: (_target: unknown, data: any) => ({ ...data }),
+        save: async (a: any, b?: any) => repo.save(b ?? a),
+      },
+    }),
+  };
+}
+
+
 describe('CrmService.convertEntity', () => {
   const build = (entity: Record<string, any> | null) => {
     const saved: Record<string, any>[] = [];
@@ -38,6 +67,9 @@ describe('CrmService.convertEntity', () => {
       {} as any,
       {} as any,
       new CrmAccessService(),
+      {} as any,
+      {} as any,
+      fakeDataSource(entityRepo) as any,
     );
     return { service, saved, entityRepo, searchService };
   };

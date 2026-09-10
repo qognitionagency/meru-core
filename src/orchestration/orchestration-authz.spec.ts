@@ -85,6 +85,10 @@ describe('OrchestrationService authorisation', () => {
       {} as any,
       {} as any,
       access,
+      {} as any,
+      {} as any,
+      // dataSource — these tests only read, so no transaction is opened.
+      {} as any,
     );
     const search = searchOverride ?? { search: jest.fn().mockResolvedValue([]) };
     const aiService = { analyzeEntity: jest.fn().mockResolvedValue(citedInsights()) };

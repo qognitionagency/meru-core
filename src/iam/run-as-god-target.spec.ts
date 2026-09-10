@@ -101,6 +101,7 @@ describe('runAsGod call sites — the audit row is filed under the tenant touche
           getTenantStats: jest.fn().mockResolvedValue({}),
           listAllTenants: jest.fn().mockResolvedValue([]),
           provisionTenant: jest.fn().mockResolvedValue({}),
+          mintSignupInvite: jest.fn().mockResolvedValue({}),
         } as any,
         tenancyService,
         { inviteUser: jest.fn().mockResolvedValue({}) } as any,
@@ -158,6 +159,17 @@ describe('runAsGod call sites — the audit row is filed under the tenant touche
 
       await controller.provision(operatorReq, {
         slug: 'new-firm',
+      } as any);
+
+      expect(auditedTenantId(logEvent)).toBe(OPERATOR_TENANT);
+    });
+
+    it('deliberate exception: mintInvitation (DEF-1) has no target tenant either — nothing exists until redemption', async () => {
+      const { tenancyService, logEvent } = buildTenancyService();
+      const controller = buildController(tenancyService);
+
+      await controller.mintInvitation(operatorReq, {
+        email: 'owner@newfirm.example',
       } as any);
 
       expect(auditedTenantId(logEvent)).toBe(OPERATOR_TENANT);

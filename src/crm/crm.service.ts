@@ -6,7 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import {
   UniversalEntity,
   EntityStatus,
@@ -24,6 +24,7 @@ import { CrmAccessService } from './crm-access.service';
 import { Actor } from '../common/access';
 import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import { RuleEvaluatorService } from '../rules/rule-evaluator.service';
+import { SUBJECT_TYPES, claimRecordNumber, seriesFor } from './record-identity';
 
 /**
  * Statuses that mean the record is finished. Transitioning *into* one of these
@@ -82,16 +83,11 @@ const CONVERTIBLE_TYPES: ReadonlyMap<
   [EntityType.ORGANIZATION, new Set([EntityType.PERSON])],
 ]);
 
-/**
- * The types a vertical's configured field list actually describes — the
- * "Client"/"Applicant"/"Patient" that `VerticalConfig.entityName` names.
- * Structural records (note, tag) and workable ones (case, obligation, breach)
- * carry their own attributes and are not held to the subject's schema.
- */
-const SUBJECT_TYPES: ReadonlySet<EntityType> = new Set([
-  EntityType.PERSON,
-  EntityType.ORGANIZATION,
-]);
+// `SUBJECT_TYPES` and `seriesFor` live in `./record-identity` rather than here.
+// ADR 0010 §2.3 requires the numbering decision and the required-field check
+// below to read the SAME definition of "what counts as a client", and
+// `ImportService` — a third producer of subject rows — needs both without
+// importing this service's whole provider graph across a module boundary.
 
 @Injectable()
 export class CrmService {
@@ -107,6 +103,12 @@ export class CrmService {
     private readonly access: CrmAccessService,
     private readonly packs: VerticalPackService,
     private readonly evaluator: RuleEvaluatorService,
+    // ADR 0010 §2.2. A plain `DataSource`, matching `BillingService`'s
+    // (`billing.service.ts:68`) — `DataSource` is a global provider under
+    // `TypeOrmModule.forRoot()`, so no `@InjectDataSource()` and no change to
+    // `CrmModule`'s imports. Last in the list so the existing positional
+    // arguments every spec passes keep their meaning.
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -228,7 +230,7 @@ export class CrmService {
         }
       }
 
-      const entity = this.entityRepo.create({
+      const draft = {
         tenantId,
         type: dto.type,
         firstName: dto.firstName,
@@ -257,11 +259,55 @@ export class CrmService {
         status: dto.status ?? defaultStatusFor(dto.type),
         dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
         assignedTo: dto.assignedTo ?? null,
-      });
+      };
 
-      const savedEntity = await this.entityRepo.save(entity);
+      // ADR 0010 §2.2 — claim the record number and insert the row in ONE
+      // transaction.
+      //
+      // Opened AFTER the pre-checks above (settings fetch, duplicate-email
+      // check) deliberately: those are reads that can reject the request, and
+      // holding a counter row lock across them would make every rejected
+      // create block every accepted one for the same tenant.
+      //
+      // Rolling back takes the counter increment with it, so a number is never
+      // burned on a record that was not created. A number CAN still be skipped
+      // if the transaction commits and a later non-transactional step fails —
+      // `indexEntityData` below is fire-and-forget and outside it. That is an
+      // accepted gap: the ADR forbids REUSE, not gaps.
+      //
+      // Every statement in here runs on a connection `applyRlsToDataSource`
+      // has already bound to `TenantContext`'s tenant — `obtainMasterConnection`
+      // is patched on the shared `DataSource`, so a manually-opened QueryRunner
+      // is bound exactly like a repository call. `tenantId` is the caller's own
+      // JWT tenant, never a body field. Both layers (CLAUDE.md §8).
+      const series = seriesFor(dto.type);
+      const queryRunner = this.dataSource.createQueryRunner();
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
 
-      this.logger.log(`Entity created successfully: ${savedEntity.id}`);
+      let savedEntity: UniversalEntity;
+      try {
+        const recordNumber = series
+          ? await claimRecordNumber(queryRunner, tenantId, series)
+          : null;
+
+        const entity = queryRunner.manager.create(UniversalEntity, {
+          ...draft,
+          recordNumber,
+        });
+        savedEntity = await queryRunner.manager.save(entity);
+        await queryRunner.commitTransaction();
+      } catch (err) {
+        await queryRunner.rollbackTransaction();
+        throw err;
+      } finally {
+        await queryRunner.release();
+      }
+
+      this.logger.log(
+        `Entity created successfully: ${savedEntity.id}` +
+          (savedEntity.recordNumber ? ` (${savedEntity.recordNumber})` : ''),
+      );
 
       this.searchService.indexEntityData(savedEntity).catch((err) => {
         this.logger.error('Failed to index entity:', err);
@@ -683,8 +729,54 @@ export class CrmService {
       },
     });
 
-    const saved = await this.entityRepo.save(entity);
-    this.logger.log(`Entity ${id} converted: ${fromType} → ${toType}`);
+    // ADR 0010 §2.4 — the one case that assigns a number where none existed.
+    //
+    // A lead has no `recordNumber` (leads are not eligible). The moment it
+    // becomes a client it needs one, claimed through the identical mechanism
+    // `createEntity` uses and inside the same transaction as the type rewrite.
+    //
+    // Gated on `recordNumber == null`, so re-converting
+    // PERSON → ORGANIZATION → PERSON never claims a second number: a number,
+    // once issued, belongs to the record for as long as the record exists.
+    //
+    // This does NOT touch `firstName`/`lastName`, and must not. ADR 0011 §2.2:
+    // core cannot know where a vertical stashed a lead's name — `lead.fields
+    // .first_name`, `lead.first_name`, `applicant.name` are all plausible —
+    // and guessing is an 80/20 violation that would fabricate an identity. The
+    // producer populates the promoted columns at creation; conversion carries
+    // whatever is there through unchanged.
+    const series = entity.recordNumber == null ? seriesFor(toType) : null;
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    let saved: UniversalEntity;
+    try {
+      if (series) {
+        entity.recordNumber = await claimRecordNumber(
+          queryRunner,
+          tenantId,
+          series,
+        );
+      }
+      saved = await queryRunner.manager.save(UniversalEntity, entity);
+      await queryRunner.commitTransaction();
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      // Leave the in-memory row as the caller found it. Without this a rolled
+      // back conversion would still hand back an object carrying a number the
+      // database never issued.
+      if (series) entity.recordNumber = null;
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+
+    this.logger.log(
+      `Entity ${id} converted: ${fromType} → ${toType}` +
+        (series ? ` (assigned ${saved.recordNumber})` : ''),
+    );
 
     // The search index carries `type`; leaving it stale would keep the record
     // answering to its old type in every filtered list.

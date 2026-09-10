@@ -6,6 +6,8 @@ import { AddTenantRowLevelSecurity1753500000000 } from '../migrations/1753500000
 import { AddVesselPositions1754200000000 } from '../migrations/1754200000000-AddVesselPositions';
 import { AddTenantConnectors1754700000000 } from '../migrations/1754700000000-AddTenantConnectors';
 import { AddWatchlistEntries1754900000000 } from '../migrations/1754900000000-AddWatchlistEntries';
+import { AddJobRuns1755100000000 } from '../migrations/1755100000000-AddJobRuns';
+import { AddTenantSignupInvites1756800000000 } from '../migrations/1756800000000-AddTenantSignupInvites';
 
 export type MigrateTarget = 'control' | 'govx' | 'immistack';
 
@@ -133,11 +135,25 @@ export class MigrateService {
         // every migration that carries RLS has to be replayed. These three are
         // idempotent (IF NOT EXISTS / DROP POLICY IF EXISTS), and rls:verify
         // fails the deploy if any table is left uncovered.
+        // `AddTenantRowLevelSecurity` covers most tables dynamically — it loops
+        // `information_schema.columns WHERE column_name = 'tenantId'`, and by
+        // this point `synchronize()` has created every table, so anything
+        // tenant-scoped is picked up whenever its migration was written.
+        //
+        // The entries below are the exceptions: tables that are **pre-tenant by
+        // design** and therefore carry no `tenantId` for that loop to find, so
+        // they need their own bypass-only policy replayed explicitly.
+        // `job_runs` and `tenant_signup_invites` were missing here and a fresh
+        // database came up with RLS absent on both — caught by `rls:verify`,
+        // which is exactly why the assertion below now runs inside bootstrap
+        // rather than only in a separate command someone may not run.
         const rlsMigrations = [
           new AddTenantRowLevelSecurity1753500000000(),
           new AddVesselPositions1754200000000(),
           new AddTenantConnectors1754700000000(),
           new AddWatchlistEntries1754900000000(),
+          new AddJobRuns1755100000000(),
+          new AddTenantSignupInvites1756800000000(),
         ];
         const runner = ds.createQueryRunner();
         try {
@@ -158,8 +174,45 @@ export class MigrateService {
           );
         }
 
+        // Prove RLS coverage before declaring success.
+        //
+        // Bootstrap is the one path that builds a database without running the
+        // migration chain, so it is also the one path where a table can come up
+        // with no policy and nothing notice. That happened: `job_runs` and
+        // `tenant_signup_invites` are pre-tenant tables the dynamic loop cannot
+        // see, their migrations were not in the replay list, and the database
+        // came up with tenant isolation absent on both.
+        //
+        // Failing here rather than in a later `rls:verify` matters because
+        // `rls:verify` is a separate command against a separate URL that a
+        // deploy can skip. A provisioning step that cannot prove isolation must
+        // not report that it provisioned anything.
+        const uncovered = await ds.query<{ tablename: string }[]>(`
+          SELECT c.relname AS tablename
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public'
+            AND c.relkind = 'r'
+            AND c.relname <> 'migrations'
+            AND NOT (c.relrowsecurity AND c.relforcerowsecurity)
+          ORDER BY 1
+        `);
+        if (uncovered.length > 0) {
+          const names = uncovered.map((r) => r.tablename).join(', ');
+          throw new Error(
+            `Bootstrap of '${target}' left ${uncovered.length} table(s) without ` +
+              `ENABLE + FORCE row-level security: ${names}. ` +
+              `Add the migration that creates each one to \`rlsMigrations\` above — ` +
+              `a table with no policy is readable across every tenant.`,
+          );
+        }
+
         this.logger.log(
-          `Bootstrapped '${target}': schema from entities + RLS, ${ALL_MIGRATIONS.length} migrations baselined`,
+          `Bootstrapped '${target}': schema from entities + RLS (${
+            (await ds.query<{ n: string }[]>(
+              `SELECT count(*)::text AS n FROM pg_policies WHERE schemaname='public'`,
+            ))[0]?.n ?? '?'
+          } policies, all tables forced), ${ALL_MIGRATIONS.length} migrations baselined`,
         );
         return {
           target,

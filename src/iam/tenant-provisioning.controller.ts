@@ -33,6 +33,7 @@ import { TenantProvisioningService } from './tenant-provisioning.service';
 // import is erased, `design:paramtypes` degrades to `Object`, and validation is
 // skipped entirely — the same silent no-op that made this an interface a bug.
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import { MintTenantSignupInviteDto } from './dto/mint-tenant-signup-invite.dto';
 import { CheckSlugDto } from './dto/check-slug.dto';
 import { DeleteTenantDto } from './dto/delete-tenant.dto';
 import { TenantPlan, TenantStatus } from './entities/tenant.entity';
@@ -270,12 +271,54 @@ export class TenantProvisioningController {
     );
   }
 
+  @Post('invitations')
+  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @Roles(PlatformRole.PLATFORM_ADMIN)
+  @ApiBearerAuth('JWT-auth')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Mint a single-use invitation to self-provision a workspace (DEF-1)',
+    description:
+      'platform_admin only. Emails the recipient a token that ' +
+      '`POST /tenants/signup` now requires — unauthenticated self-signup ' +
+      'with no invite is no longer accepted. `allowedSlug`/' +
+      '`allowedVertical`/`allowedPlan` pin those choices at redemption when ' +
+      'set; a redemption request that disagrees with a pinned value is ' +
+      'refused. Cross-tenant write (no target tenant exists yet) → ' +
+      'runAsGod + CRITICAL audit entry, same convention as `POST /tenants`.',
+  })
+  @ApiResponse({ status: 201, description: 'Invitation minted and emailed' })
+  @ApiResponse({ status: 403, description: 'Requires platform_admin' })
+  async mintInvitation(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: MintTenantSignupInviteDto,
+  ) {
+    // Left under the operator's own tenant, deliberately — same reasoning as
+    // `provision` above: there is no target tenant yet to attribute to.
+    return this.tenancyService.runAsGod(
+      req.user.id,
+      req.user.tenantId,
+      `Mint signup invite for ${dto.email} (DEF-1)`,
+      () => this.tenantProvisioningService.mintSignupInvite(dto, req.user.id),
+    );
+  }
+
   @Post('signup')
   @Public()
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Create a new workspace (tenant)' })
+  @ApiOperation({
+    summary: 'Create a new workspace (tenant)',
+    description:
+      'Requires `token` from a `POST /tenants/invitations` invite (DEF-1) — ' +
+      'unauthenticated self-signup with no invite is no longer accepted.',
+  })
   @ApiResponse({ status: 201, description: 'Workspace created successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid input or slug taken' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid input, slug taken, or the invite token is missing, expired, ' +
+      'already used, or bound to a different email/slug/vertical/plan',
+  })
   async signup(@Body() dto: CreateTenantDto) {
     const result = await this.tenantProvisioningService.createTenant(dto);
 
@@ -326,11 +369,16 @@ export class TenantProvisioningController {
     return result;
   }
 
-  // Guarded explicitly. There is no global APP_GUARD in this app — every
-  // controller opts in — and this one had opted out entirely, leaving a
-  // billing-mutating endpoint reachable unauthenticated by anyone who could
-  // guess or observe a tenant id. `signup` and `check-slug` above stay public
-  // by design; everything that touches an existing tenant does not.
+  // Guarded explicitly, for `PolicyGuard`/`@Roles` — this endpoint had opted
+  // out entirely, leaving a billing-mutating route reachable by anyone who
+  // could guess or observe a tenant id. `signup` and `check-slug` above stay
+  // public by design; everything that touches an existing tenant does not.
+  //
+  // *(Corrected 2026-09-10. This comment used to claim "there is no global
+  // APP_GUARD in this app — every controller opts in". `src/app.module.ts:153`
+  // registers `GlobalAuthGuard` as `APP_GUARD`: authentication IS default-deny
+  // and the public routes above are public because they carry `@Public()`, not
+  // because nothing guards them.)*
   @Patch(':id/upgrade')
   @UseGuards(AuthGuard('jwt'), PolicyGuard)
   @ApiBearerAuth('JWT-auth')

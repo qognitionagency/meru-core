@@ -7,6 +7,7 @@ import { UniversalEntity } from '../crm/entities/universal-entity.entity';
 import { Payment } from '../billing/entities/payment.entity';
 import { Tenant } from '../iam/entities/tenant.entity';
 import { DocumentsService } from './documents.service';
+import { DocumentAccessService } from './document-access.service';
 import type { Actor } from '../common/access';
 
 /** One block of a pack-authored document. Mirrors DocumentBlockSchema. */
@@ -100,6 +101,7 @@ export class DocumentGenerationService {
     @InjectRepository(Tenant)
     private readonly tenantRepo: Repository<Tenant>,
     private readonly documents: DocumentsService,
+    private readonly access: DocumentAccessService,
   ) {}
 
   /** Every template the tenant's pack declares. */
@@ -125,11 +127,19 @@ export class DocumentGenerationService {
    * worse than no document: it looks executable, a client may sign it, and the
    * firm has a signed instrument with a hole in it. `requires` is the pack
    * author's declaration of which holes are unacceptable.
+   *
+   * `actor` is checked against `entityId` before anything is read. This route
+   * returns the rendered PDF bytes directly (`res.send`, not a stored
+   * `Document` row) — storing is optional via `?store=true` and was the only
+   * path that scoped by owner. Without this check any authenticated caller in
+   * the tenant could pass any `entityId` and receive that record's filled
+   * cost agreement: name, fees, payment history and vertical attributes.
    */
   async generate(
     tenantId: string,
     vertical: string | null,
     templateKey: string,
+    actor: Actor,
     entityId?: string,
   ): Promise<GeneratedDocument> {
     const { section } = await this.packs.sectionWithPack<DocumentTemplate[]>(
@@ -145,7 +155,7 @@ export class DocumentGenerationService {
       );
     }
 
-    const context = await this.buildContext(tenantId, entityId);
+    const context = await this.buildContext(tenantId, actor, entityId);
 
     // Empty counts as missing, not just absent. `substitute` already reports an
     // empty string as unresolved, and in a rendered document a blank and a
@@ -256,8 +266,18 @@ export class DocumentGenerationService {
    */
   private async buildContext(
     tenantId: string,
+    actor: Actor,
     entityId?: string,
   ): Promise<Record<string, unknown>> {
+    // Same predicate `DocumentChecklistService.forEntity` and
+    // `DocumentsService.upload/.create` apply, checked before the entity is
+    // ever loaded. `tenant`/`god` scope is unrestricted; `own` scope must own
+    // the named record. 404, not 403 — a real-but-foreign entityId is itself
+    // a disclosure, matching the rest of DocumentAccessService's callers.
+    if (entityId) {
+      await this.access.assertOwnsEntity(tenantId, entityId, actor);
+    }
+
     const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
 
     const entity = entityId

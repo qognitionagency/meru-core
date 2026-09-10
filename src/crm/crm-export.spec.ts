@@ -82,6 +82,10 @@ describe('CrmService.exportEntitiesCsv — export has its own cap, independent o
       {} as any, // documentHubService
       {} as any, // relations
       {} as any, // access
+      {} as any, // packs
+      {} as any, // evaluator
+      // dataSource — export never opens a transaction, so nothing reaches it.
+      {} as any,
     );
     return { service, getTake };
   }

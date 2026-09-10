@@ -7,6 +7,7 @@ import {
   UniversalEntity,
 } from '../../crm/entities/universal-entity.entity';
 import { VerticalPackService } from '../../tenant/services/vertical-pack.service';
+import { claimRecordNumber, seriesFor } from '../../crm/record-identity';
 
 /** One `importMappings[]` entry, as the pack declares it. */
 export interface ImportMappingDefinition {
@@ -289,11 +290,37 @@ export class ImportService {
           );
           updated++;
         } else {
+          // ADR 0010. Import is the THIRD producer of person/organization
+          // rows, alongside `CrmService.createEntity` and `convertEntity`,
+          // and the ADR names only the other two. Numbering here as well is
+          // additive and deliberate: ADR 0011 §2.2 states a client record's
+          // number is the one thing about its identity the server can always
+          // promise, and a firm's whole client base arriving unnumbered
+          // through the importer would make that promise false for exactly
+          // the records most likely to be looked up against a paper file.
+          // Flagged for Kyle in review rather than assumed.
+          //
+          // NOT in a transaction with the insert, unlike `createEntity`: this
+          // loop already saves each row on its own, and wrapping the whole
+          // commit would hold one counter row lock across up to 5,000 rows.
+          // The cost is that a row which fails to insert burns its number —
+          // an accepted gap (ADR §2.2 forbids reuse, not gaps), where holding
+          // that lock is not.
+          //
+          // Tenant scope: `tenantId` is the caller's own, passed down from
+          // `req.user.tenantId`; `tenant_record_counters` is FORCE RLS and
+          // its policy's WITH CHECK refuses any other tenant's insert.
+          const series = seriesFor(mapping.targetEntityType as EntityType);
+          const recordNumber = series
+            ? await claimRecordNumber(this.entities.manager, tenantId, series)
+            : null;
+
           await this.entities.save(
             this.entities.create({
               tenantId,
               type: mapping.targetEntityType as EntityType,
               ...columns,
+              recordNumber,
               verticalAttributes: attributes,
             }),
           );

@@ -121,6 +121,15 @@ export enum EntityStatus {
 // runs on the applicant's own page load. It gets a real index for the same
 // reason the workboard reads above do.
 @Index(['tenantId', 'subjectEmail'])
+// ADR 0010: a number is unique per tenant and never reused. Partial, because
+// every non-eligible type (note, tag, asset, lead) leaves it null and a plain
+// unique index would then admit exactly one null-numbered row per tenant.
+// This is the database-level half of "never reused"; the counter's atomic
+// upsert is the application-level half, and both are load-bearing.
+@Index(['tenantId', 'recordNumber'], {
+  unique: true,
+  where: '"recordNumber" IS NOT NULL',
+})
 export class UniversalEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -187,6 +196,31 @@ export class UniversalEntity {
    */
   @Column({ type: 'varchar', nullable: true })
   subjectEmail: string | null;
+
+  /**
+   * The record's own generated identity — `CL-000001` for a person or
+   * organization, `CS-000001` for a case. Unique per tenant, never reused.
+   * ADR 0010.
+   *
+   * ONE generic column rather than `clientNumber` + `caseNumber`, for the same
+   * reason as the `status`/`dueDate`/`assignedTo` trio above: `type` already
+   * determines which series applies (`seriesFor`, `src/crm/record-identity.ts`),
+   * and "client"/"case" appears only as a two-letter prefix VALUE, never as a
+   * schema concept. A future GRC obligation or SAR number is a third prefix
+   * and one more branch in `seriesFor` — not a migration.
+   *
+   * **Assigned by the server, never accepted from a caller.** It is absent
+   * from `CreateEntityDto` and `UpdateEntityDto`, and the global
+   * `ValidationPipe`'s `forbidNonWhitelisted` turns a body carrying it into a
+   * 400 — the same mechanism that already refuses a stray `type` on PATCH.
+   *
+   * Null for types that draw from no series (note, tag, asset, lead, and every
+   * GovX module type), and for any row created before ADR 0010's backfill
+   * migration ran. A consumer must treat null as "this record has no number",
+   * never as a number of zero.
+   */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  recordNumber: string | null;
 
   @Column({ type: 'jsonb', default: {} })
   verticalAttributes: Record<string, any>;

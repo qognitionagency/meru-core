@@ -42,9 +42,16 @@ import {
  *
  * This controller had NO guard at all, which left `POST /`, `PUT /:id`,
  * `DELETE /:id`, `promote`, `promote-all` and tenant pinning reachable
- * unauthenticated — platform-global config CRUD open to the internet. There is
- * no global APP_GUARD in this app (every controller opts in), so the absence of
- * `@UseGuards` here meant genuinely no authentication, not a default-deny.
+ * unauthenticated — platform-global config CRUD open to the internet.
+ *
+ * *(Corrected 2026-09-10. This paragraph used to say "there is no global
+ * APP_GUARD in this app (every controller opts in)". That is false and is now
+ * the opposite of the truth: `src/app.module.ts:153` registers
+ * `GlobalAuthGuard` as `APP_GUARD`, so authentication is default-deny and a
+ * route is only anonymous if it declares `@Public()`. The explicit
+ * `@UseGuards` below is still correct and still load-bearing — it is what
+ * attaches `PolicyGuard` for the `@Roles` checks — but do not read the old
+ * sentence and conclude that an unguarded controller elsewhere is open.)*
  *
  * Reads require a valid token; anything that mutates a pack or a tenant pin
  * requires `platform_admin`, because a pack change propagates to every tenant

@@ -119,6 +119,8 @@ describe('DocumentsService — linkedEntityId is ownership-checked on create', (
       {} as any, // orchestrationService
       access,
       storage as any,
+      // Checklist bookkeeping after a document lands — not exercised here.
+      { recordIntake: jest.fn(async () => ({ outcome: 'no-request-recorded' })) } as any,
     );
 
     return { service, storage, dataSource, savedDocuments, savedVersions };

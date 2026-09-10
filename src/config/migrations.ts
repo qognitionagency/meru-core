@@ -40,6 +40,10 @@ import { RelaxDocumentCurrentVersionIdNotNull1756410000000 } from '../migrations
 import { AddSubjectEmailToEntities1756500000000 } from '../migrations/1756500000000-AddSubjectEmailToEntities';
 import { BackfillVacStatus1756600000000 } from '../migrations/1756600000000-BackfillVacStatus';
 import { AddTenantFeeOverrides1756700000000 } from '../migrations/1756700000000-AddTenantFeeOverrides';
+import { AddTenantSignupInvites1756800000000 } from '../migrations/1756800000000-AddTenantSignupInvites';
+import { AddRecordNumbering1756900000000 } from '../migrations/1756900000000-AddRecordNumbering';
+import { BackfillRecordNumbers1756910000000 } from '../migrations/1756910000000-BackfillRecordNumbers';
+import { AddUserPractitionerCredential1756920000000 } from '../migrations/1756920000000-AddUserPractitionerCredential';
 
 /**
  * Every migration, bundled. The Vercel serverless bundle cannot glob the
@@ -100,4 +104,16 @@ export const ALL_MIGRATIONS = [
   AddSubjectEmailToEntities1756500000000,
   BackfillVacStatus1756600000000,
   AddTenantFeeOverrides1756700000000,
+  // DEF-1 — POST /tenants/signup gate. Registered in the same commit as the
+  // migration itself, unlike the four prior recurrences of "migration on
+  // disk, missing here" this file's own comments record.
+  AddTenantSignupInvites1756800000000,
+  // ADR 0010 — client/case numbering. Schema first, then the backfill: the
+  // backfill writes into a column the previous entry creates, so the order in
+  // this list is load-bearing and not merely tidy.
+  AddRecordNumbering1756900000000,
+  BackfillRecordNumbers1756910000000,
+  // FR-1.2 — the practitioner credential the onboarding wizard has been
+  // collecting with nowhere to store it.
+  AddUserPractitionerCredential1756920000000,
 ];

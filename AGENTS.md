@@ -4,18 +4,28 @@
 > documentation. Architecture and rules are in [CLAUDE.md](CLAUDE.md); these two
 > files are the entire documentation surface.
 >
-> **Last verified 2026-09-08 (Jonas).** Live production (`meru-core.vercel.app`, `main`)
-> answers **274 paths / 326 operations** on `/api-json` (`curl` this session; was
-> 273/325 on 2026-09-05 — `auth` -1 for the removed `/auth/register`, a new `alerts`
-> prefix +2). `GET /health/capabilities` reports **2 live / 12 unconfigured**,
-> `[UNVERIFIED: recount]` — that route now requires an operator token (§16 of
-> workspace `CLAUDE.md`) and this pass had none. `ALL_MIGRATIONS` in
-> `src/config/migrations.ts` counts **41 entries**, matching **41 files** in
-> `src/migrations/` 1:1 (`ls src/migrations/*.ts | grep -v spec | wc -l`) — up
-> from 39 on 2026-09-05, now including `AddInboundWebhooks` (registered 2026-09-05
-> after being on disk and missing from the array for a fourth time — see below).
-> Per the operator, all 41 have been applied to production; not independently
-> checkable from this repo without a DB connection.
+> **Last verified 2026-09-10 (Jonas).** Live production (`meru-core.vercel.app`, `main`)
+> answers **278 paths / 331 operations** on `/api-json` (`curl` this session; 274/326 on
+> 2026-09-08, 273/325 on 2026-09-05).
+>
+> The `alerts` prefix that earlier passes flagged as "not traced to a controller" **is
+> traced**: `src/rules/alert-rule.controller.ts:53` declares `@Controller('alerts')` under
+> `@ApiTags('rules')`. The prefix and the tag differ, which is exactly why searching the spec
+> by tag never found it. `/alerts` and `/alerts/resolved`, staff-and-above.
+>
+> **Capabilities: 3 live · 1 degraded · 10 unconfigured · 0 unknown** (14 total), read from
+> the `capabilities` block of the **unauthenticated** `GET /api/v1/health`. The detailed
+> `GET /health/capabilities` returns `MER-AUTH-0001` at HTTP **401** without an operator
+> token — confirmed at runtime today, so that role check is closed in behaviour and not only
+> in source. The old "2 live / 12 unconfigured" figure is superseded.
+>
+> `ALL_MIGRATIONS` in `src/config/migrations.ts` counts **46 entries**, matching **46 files**
+> in `src/migrations/` 1:1 (`ls src/migrations/*.ts | grep -v spec | wc -l`) — 43 earlier on
+> 2026-09-10, 41 on 2026-09-08. The four newest — `AddTenantSignupInvites`,
+> `AddRecordNumbering`, `BackfillRecordNumbers`, `AddUserPractitionerCredential` — are
+> **uncommitted** (see the 2026-09-10 blocks below); 42 are committed. Per the operator, the
+> committed ones have been applied to production; not independently checkable from this repo
+> without a DB connection. **Re-count, do not quote — this number has moved twice in one day.**
 >
 > **DEPLOYED 2026-09-06.** The paragraph that stood here said "NOT YET
 > DEPLOYED… nothing here has merged". That is false and was false for a day:
@@ -25,13 +35,21 @@
 > whose content is already on `main` — it is **superseded, delete it** rather
 > than carrying it as pending work.
 >
-> **Still not run against `1841789`:** `npm test` and `npm run rls:verify`.
-> `npm run check:cjs` passes. Jest cannot run on this host — it forks a worker
-> pool and gets starved (measured 2026-09-07: 0.44s of CPU across 14 minutes at
-> 0.0%, and `--runInBand` fared no better). That is the workspace `CLAUDE.md`
-> §14 memory pathology, not a code fault, but it means the unit suite is
-> **unverified on what is deployed**. Vercel's remote build is the only gate
-> that currently works; it compiles, it does not run tests.
+> **`npm test` runs on this host and is a required gate again.**
+> *(Corrected 2026-09-10. The paragraph that stood here said "Jest cannot run on this host"
+> and named a worker-pool starvation measurement from 2026-09-07. That was true only while
+> the tree sat on a full iCloud Drive; it was **never** a jest problem and it is not one
+> now.)*
+>
+> From `~/dev/meru/meru-core`: **77 suites / 953 tests, all green, in ~9 seconds** (measured
+> 2026-09-10 04:06; three consecutive identical runs). `npm run check:cjs` passes — 52 packages,
+> no ESM-only dependency.
+>
+> **Do not quote that count.** It moved 75/925 → 76/938 → 77/953 inside twenty minutes because
+> another agent was adding specs to this tree while it was being measured. Run the suite; the
+> number it prints is the number.
+>
+> Treating the test gate as unavailable is how a deployed build went unverified for days.
 >
 > A merged commit is still not a shipped one — check `/api-json`'s path count
 > after any deploy, not the git log.
@@ -71,6 +89,241 @@
 > pass. Re-verify the path/operation counts and `ALL_MIGRATIONS` entry count
 > above once that branch actually deploys — this paragraph records what was
 > integrated, not a new production observation.
+
+---
+
+## 0. Uncommitted on `main` right now — 2026-09-10
+
+**`main` is `02b290a`, level with `origin/main`. None of the following is committed, and
+none of it is deployed.** The live `/api-json` still shows the pre-fix surface; that is the
+check that matters, not the git log.
+
+> **This inventory is a snapshot at 04:06 on 2026-09-10 and the tree was moving while it was
+> written.** `git status` went from 27 entries to 38 during the pass — a `document-request`
+> feature (`src/documents/document-request.service.ts` + spec + DTO), `src/core/mail/mail-brand.ts`
+> + spec, and two ADRs (`0010-client-and-case-numbering`,
+> `0011-record-identity-and-unnamed-client-contract`) appeared after it began and are **not**
+> described below. **Run `git status` before trusting this section's completeness.** The three
+> items that are described were each read in the code and are accurate as written.
+
+Two authorisation defects, both of which were **live on production**, and one migration.
+
+### 0.1 `POST /documents/generate/:templateKey` — cross-tenant-user data leak
+
+`document-generation.service.ts` read `entityId` from the query string and filtered only
+`{ id: entityId, tenantId }`. RLS scopes the tenant, not the user inside it, so a
+`client`-role token could name **any** record id in its own tenant and receive a rendered
+**PDF** containing another applicant's name, fee schedule and full payment history —
+formatted by the firm's own cost-agreement or invoice template.
+
+**Fix:** `await this.access.assertOwnsEntity(tenantId, entityId, actor)` at
+`document-generation.service.ts:278`, before the entity is loaded. `tenant`/`god` scope
+passes untouched; `own` scope must own the record. Refusal is **404, not 403** — confirming
+that a real-but-foreign id exists is itself a disclosure, matching `/payments` and
+`DocumentAccessService`'s other callers.
+
+**Spec:** `src/documents/document-generation-authz.spec.ts` (new).
+**Not a new predicate** — `DocumentAccessService.assertOwnsEntity` already existed and was
+already used by `DocumentChecklistService.forEntity` and `DocumentsService.upload/.create`.
+This route simply never called it. That is the whole finding.
+
+> **This is the fifth instance of the within-tenant isolation class** tracked in workspace
+> `CLAUDE.md` §8 (`/crm/entities`, `/payments`, `/communications/threads`, `/documents`,
+> and now document generation). Four of the five were the same mistake: a service trusting a
+> caller-supplied record id because the controller was authenticated and RLS had already
+> scoped the tenant. **The review question for any new route accepting an `entityId`,
+> `linkedEntityId` or `clientId` from a client-role caller is "does it call
+> `assertOwnsEntity`", not "does it filter on `tenantId`".**
+
+### 0.2 DEF-1 — `POST /tenants/signup` was unauthenticated tenant provisioning
+
+`@Public()`, and it **worked on production**: an anonymous request created a TRIAL tenant
+*and* a `firm_admin` login with a caller-supplied password. Same defect class as
+`POST /auth/register`, removed on 2026-09-04 — one controller over, missed at the time.
+
+Now gated by a single-use, expiring **`TenantSignupInvite`**, minted **`platform_admin`-only**
+via `POST /tenants/invitations` (`tenant-provisioning.controller.ts`). That mint runs through
+`runAsGod` with a `CRITICAL` audit entry, because no target tenant exists yet to attribute the
+write to — same convention as `POST /tenants`.
+
+- Bound to an email; redemption requires `CreateTenantDto.email` to match, checked server-side.
+- May pin `allowedSlug` / `allowedVertical` / `allowedPlan`; a redemption that disagrees with a
+  pinned value is refused.
+- **Only the SHA-256 digest of the token is stored**, never the token — the same discipline as
+  `AuthToken` and `sessions.refreshTokenHash`.
+- Deliberately not reusing `AuthToken`: that entity requires both `userId` and `tenantId`, and
+  neither exists when the invite is minted. Creating them is the point of redeeming it.
+- No `tenantId` column, so its RLS policy is bypass-only rather than the standard
+  `tenant_isolation` predicate. The migration comment explains why; read it before copying the
+  pattern to another table.
+
+**Files:** `src/iam/entities/tenant-signup-invite.entity.ts`,
+`src/iam/dto/mint-tenant-signup-invite.dto.ts`, `src/iam/tenant-signup-invite.spec.ts`,
+plus changes to `tenant-provisioning.{controller,service}.ts`, `create-tenant.dto.ts`,
+`iam.module.ts` and `core/mail/mail.service.ts`.
+
+### 0.3 Migration `1756800000000-AddTenantSignupInvites`
+
+**Rollback, read before the forward was written:**
+
+```
+public async down(queryRunner: QueryRunner): Promise<void> {
+  await queryRunner.query(`DROP TABLE IF EXISTS "tenant_signup_invites"`);
+}
+```
+
+Reversible with no loss of pre-existing data — the table is new, so the reverse destroys only
+invites minted after the forward ran. Any such invite must be re-minted after a rollback;
+nothing else references the table.
+
+**Registered in both `ALL_MIGRATIONS` (`src/config/migrations.ts`) and `ALL_ENTITIES`
+(`src/config/entities.ts`) in the same change.** "Migration on disk, missing from
+`ALL_MIGRATIONS`" has now been a real production bug **four** times in this repo; the array
+carries a comment saying so. Counts stay 1:1 — **46/46** as of the §0.3b block below.
+
+### 0.3b R0 backend — ADR 0010 / ADR 0011 / FR-1.2 (2026-09-10, Luke)
+
+Three migrations, all additive, all registered in `ALL_MIGRATIONS` in the same change:
+`1756900000000-AddRecordNumbering`, `1756910000000-BackfillRecordNumbers`,
+`1756920000000-AddUserPractitionerCredential`. `TenantRecordCounter` is registered in
+`ALL_ENTITIES` too, even though nothing reads it through a repository — the catalogue is
+what the govx/immistack DataSources build their schema from.
+
+**ADR 0010 — client/case numbers.** `universal_entities."recordNumber"` (nullable, partial
+UNIQUE per tenant) + `tenant_record_counters` (ENABLE + FORCE RLS, `tenant_isolation`
+policy). The claim is ONE statement — `INSERT … ON CONFLICT ("tenantId","series") DO UPDATE
+SET "value" = "value" + 1 RETURNING "value"` — in `src/crm/record-identity.ts`, run inside
+the same `QueryRunner` transaction as the entity insert. `src/crm/record-numbering.spec.ts`
+fires 25 parallel creates and asserts 25 distinct contiguous numbers, and carries a control
+test proving the `count()+1` shape collides under the identical conditions.
+
+> **`BillingService.generateInvoiceNumber` (`billing.service.ts:626-630`) still does
+> `count()+1` with no lock.** Deliberately untouched — ADR 0010 §1.2 flags it as its own
+> ticket. Do not read "numbering is done" as covering invoices.
+
+**Beyond the ADR, flagged for Kyle:** ADR 0010 names only `createEntity` and
+`convertEntity`. `ImportService.commit` is a **third** producer of `person`/`organization`
+rows, so it numbers them too (`import.service.ts`, in the create branch) — otherwise ADR
+0011 §2.2's "every client record has a number" is false for a firm's entire imported client
+base. Not in a transaction with the insert there, on purpose: the loop runs up to 5,000
+rows and holding one counter row lock across all of them would be worse than the accepted
+gap of a failed row burning a number.
+
+**ADR 0011 — record identity, server half only.**
+`ConfigPackLoaderService.unnamedSubjectMappings` rejects a pack at LOAD whose
+`importMappings[]` targets `person`/`organization`/`lead` with nothing mapped to
+`firstName`/`lastName`/`email`. All four shipped mappings pass; `grc.json`'s `vendors_csv`
+targets `vendor` and is deliberately out of scope. Search-index title chain is now
+name → `recordNumber` → email → phone → `'Unknown'`, and `recordNumber` is indexed as
+content so `CS-000042` is typeable into search.
+
+> **The frontend half is NOT done and is Mira's:** `leads.service.ts`'s `toEntityDto` must
+> lift `first_name`/`last_name` into the promoted columns, and the ten "Unnamed client"
+> render sites need the fallback chain. Until the first lands, every lead is still created
+> with `firstName = lastName = null`, and `convertEntity` will not fix it — core is
+> forbidden from deriving a name from `verticalAttributes` (ADR 0011 §2.2), so the record
+> falls through to its `recordNumber`, which is the designed behaviour and not a bug.
+
+**FR-1.2 — practitioner credential.** `users.practitionerCredential` (varchar 64) +
+`practitionerCredentialType` (varchar 32), paired by
+`CHK_users_practitioner_credential_paired`. Not on `attributes` (ADR 0001 §3's reasoning:
+a free-form bag anyone can drop by forgetting to spread) and not on ADR 0001's
+`verticalRoles` tag array (a registration NUMBER is a value, not a pack-vocabulary
+member — and that column does not exist yet anyway). Admin-only on `PATCH /iam/users/:id`.
+`DirectoryUser.practitionerCredentialVerified` is always `false` and always sent: nothing
+checks the number against OMARA/OISC/CICC and no adapter could.
+
+> **Sign-off enforcement is NOT built.** FR-1.2's second sentence — "only a credentialed
+> user may sign off advice or lodgement" — needs the whole ADR 0001 §7 chain
+> (`requiresSignOff`/`signOffRole` in the pack schema → `PackWorkflowService.materialise` →
+> a gate in `executeTransition` → `signedOffBy` in `WorkflowInstance.history[]`), none of
+> which exists. ADR 0001's `User.verticalRoles` carrier is unbuilt too. Storing the
+> credential is a prerequisite, not the requirement.
+
+### 0.4 Deploying this BREAKS ImmiStack onboarding — read before shipping §0.2
+
+> **`CreateTenantDto.token` is REQUIRED, not optional** (`src/iam/dto/create-tenant.dto.ts`,
+> `@IsString() @MinLength(1)`). **`immistack/app/(auth)/onboarding/page.tsx:169` posts to
+> `/tenants/signup` without one.** Verified in both trees, 2026-09-10.
+>
+> **Partially closed later on 2026-09-10 — option 1 is now in progress, not hypothetical.**
+> The wizard has been wired to read `?token=` from its own query string, and the invite
+> email now points at `/onboarding?token=` rather than `/signup?token=` — **`/signup` does
+> not exist in the ImmiStack app, so every invite sent before that fix was a 404 the
+> operator saw reported as `delivered: true`** (`mail.service.ts`, `signupInviteUrl`). The
+> `APP_URL` fallback also moved off `app.meru.com`, which is NXDOMAIN. Re-verify the wizard
+> actually sends the field before deploying the backend; the ordering note below still
+> holds.
+>
+> The moment §0.2 deploys, the ImmiStack self-serve onboarding wizard **400s on submit for
+> every user**, and `immistack/middleware.ts` still routes `/onboarding` as a public
+> self-serve trial signup. The two changes are in two repos and neither deploys the other, so
+> nothing will catch this except this paragraph.
+>
+> **Three ways forward — pick one deliberately, do not discover it in production:**
+>
+> 1. **Ship the frontend first.** Collect an invite token in the wizard (query param from the
+>    invite email → `firm-profile` step → the `token` field) and deploy ImmiStack before
+>    `meru-core`. Ordering matters: the backend accepts an unknown extra field today, because
+>    `CreateTenantDto` validation ignores what it does not declare — so a frontend that sends
+>    `token` early is harmless, while a backend that requires it early is not.
+> 2. **Retire self-serve.** If invite-only is the intended commercial model, remove the
+>    `/onboarding` wizard route and its public middleware entry in the same release, so users
+>    never reach a form that cannot succeed.
+> 3. **Make `token` optional behind a flag,** deploy, then flip the flag — deploy and release
+>    as separate decisions. Preferred if the answer to (1) vs (2) is not yet settled, because
+>    it makes the change reversible without a redeploy.
+>
+> **Option 3 is the only one that is reversible after the fact.** Whichever is chosen, it is
+> the operator's call, not this document's.
+
+Beyond that: §0.2 changes the **only** self-service route into the product. After it ships,
+every new workspace requires a `platform_admin` to mint an invite first. Before deploying:
+
+1. Confirm with the operator that no pending self-signups are mid-flight.
+2. Mint invites for any that are.
+
+### 0.5 DEF-1 fallout on the tenancy smoke suite — fixed 2026-09-10
+
+`scripts/smoke/cross-tenant.sh` minted its two probe tenants with a bare `POST
+/tenants/signup` and no token. §0.2 made that a 400, so both signups failed, `$TOKA`/`$TOKB`
+came back empty, and the script exited at "cannot continue" — **a bootstrap failure printed
+above `0 passed, 0 failed`, which reads like a suite with nothing to do rather than one that
+could not start.** This is the only endpoint-level "valid token, wrong tenant" suite in the
+repo and it went quiet without going red.
+
+Three changes, all in this pass:
+
+- `mktenant()` now logs in as `SWEEP_EMAIL`/`SWEEP_PASSWORD` (the same operator-credential
+  convention `scripts/smoke/api-sweep.js` already uses — nothing defaulted) and mints an
+  invite per probe address via `POST /tenants/invitations`. `XT_INVITE_TOKEN_A`/`_B` are
+  accepted instead, for a runner that holds two short-lived tokens rather than a password.
+- Bootstrap failures are now counted as **failures** and print the summary line before
+  exiting, so this shape cannot go quiet again.
+- **`smoke:tenancy` is now a CI step** (`.github/workflows/ci.yml`, after `rls:verify`).
+  It was never wired in, which is why nothing caught the regression. Skips with a
+  `::warning::` when `SMOKE_BASE_URL` / `SMOKE_OPERATOR_EMAIL` / `SMOKE_OPERATOR_PASSWORD`
+  are unset — a fork must not red-X on a missing secret — but a configured runner that
+  fails is a hard gate. **Set those three secrets, or the gate is decorative.**
+
+This depends on `mintSignupInvite` returning the raw token to the caller, which it now does
+alongside emailing it (`inviteUrl`, `delivered`). That is also the operator recovery path
+when mail is slow or misrouted: before it, the token existed only inside a message nobody in
+this system can read back.
+3. Run the backend gates in workspace `CLAUDE.md` §9 — **including `npm test`, which now
+   runs** (75 suites / 925 tests, ~5–9s).
+4. Migrate **before** pushing `main`: Vercel's git integration deploys `meru-core` on push.
+5. After deploy, check `/api-json` shows `POST /tenants/invitations` and grep the function log
+   for `Nest application successfully started`. A route table is not a boot.
+
+### 0.5 Also uncommitted, non-code
+
+`packages/config-packs/countries/au-immigration.json` → **v2.8.1**: `metadata.workflowConditions`
+prose corrected — it still claimed pack transition conditions were never evaluated, which
+stopped being true when `compileCondition` landed. Version bumped because the loader ignores a
+pack whose version is not strictly greater, so a prose-only edit reaches storage only with a
+bump. Two new ADRs on disk: `docs/adr/0010-client-and-case-numbering.md`,
+`docs/adr/0011-record-identity-and-unnamed-client-contract.md`.
 
 ---
 

@@ -1,5 +1,11 @@
 # AGENTS.md — where Meru Core actually stands
 
+> **Resuming after 2026-09-10?** Read `../NEXT-SESSION.md` in the workspace root
+> first — it carries the exact commits, the five operator-only actions still
+> outstanding (Resend domain verification above all, which blocks onboarding any
+> real customer), and three pieces of work that were briefed but never written.
+> It is not tracked by git: it lives at `~/dev/meru/NEXT-SESSION.md`.
+
 > Current state, verified against the running system rather than against
 > documentation. Architecture and rules are in [CLAUDE.md](CLAUDE.md); these two
 > files are the entire documentation surface.

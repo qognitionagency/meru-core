@@ -1,13 +1,12 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, LessThan } from 'typeorm';
+import { Repository, Between } from 'typeorm';
 import {
   AuditLog,
   AuditAction,
   AuditSeverity,
   ComplianceStandard,
 } from './entities/audit-log.entity';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { toCsv } from '../common/csv';
 import * as crypto from 'crypto';
 
@@ -424,29 +423,32 @@ export class AuditService {
   }
 
   // ==================== RETENTION & ARCHIVAL ====================
-
-  @Cron(CronExpression.EVERY_DAY_AT_2AM)
-  async archiveOldLogs(): Promise<void> {
-    this.logger.log('Archiving old audit logs...');
-
-    const retentionDays = 365; // 1 year
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
-
-    const oldLogs = await this.auditRepo.find({
-      where: {
-        timestamp: LessThan(cutoffDate),
-        archived: false,
-      },
-    });
-
-    for (const log of oldLogs) {
-      log.archived = true;
-      await this.auditRepo.save(log);
-    }
-
-    this.logger.log(`Archived ${oldLogs.length} old audit logs`);
-  }
+  //
+  // Retention lives in `RetentionService.sweep()`, and only there.
+  //
+  // What stood here was `archiveOldLogs()`, an `@Cron(EVERY_DAY_AT_2AM)` that
+  // hardcoded `retentionDays = 365` and queried `audit_logs` with **no
+  // `tenantId` filter at all**. Both of its possible fates were findings:
+  //
+  //  · On Vercel it was inert. `@nestjs/schedule` is gated off under the
+  //    serverless entrypoint (CLAUDE.md §10), and the sweep ran outside any
+  //    request, so the connection carried no `app.current_tenant_id` and FORCE
+  //    RLS matched nothing. A retention policy that silently archives zero
+  //    rows is not a retention policy.
+  //  · On any long-running deployment — this repo ships `Dockerfile`,
+  //    `fly.toml`, `render.yaml` and `k8s/`, and `ScheduleModule.forRoot()` is
+  //    registered in `app.module.ts` — it fired unbound and applied one year
+  //    to every tenant, including packs declaring seven (`retentionYears: 7`,
+  //    `dataRetentionDays: 2555`). Archiving a bank's audit trail six years
+  //    early, from a constant nobody configured, is the more expensive of the
+  //    two.
+  //
+  // `RetentionService` answers the same question correctly: per tenant, from
+  // the vertical pack's `compliance.retentionYears`, wrapped in
+  // `TenantContext.runAsSystem`, dispatched from `/jobs/tick?scope=daily`, and
+  // it refuses to guess when the pack declares nothing rather than defaulting.
+  // Two schedulers with two different retention periods on one table is worse
+  // than either alone, so this one is gone rather than corrected.
 
   // ==================== COMPLIANCE ====================
 

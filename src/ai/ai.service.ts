@@ -29,7 +29,7 @@ import { AuditService } from '../audit/audit.service';
 import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import { ConnectorsService } from '../integrations/services/connectors.service';
 import type { PackPrompt } from '../../packages/config-packs/_schema/pack.schema';
-import { Actor, SYSTEM_ACTOR, scopeOf } from '../common/access';
+import { Actor, SYSTEM_ACTOR, hasTenantWideReach } from '../common/access';
 import type { UpsertPromptDto } from './dto/ai-request.dto';
 
 /**
@@ -994,7 +994,7 @@ export class AiService {
         // nothing. An actor with no email gets nothing rather than
         // everything — fails closed, same as `CrmAccessService.ownsEntity`.
         let entities;
-        if (scopeOf(actor) === 'own') {
+        if (!hasTenantWideReach(actor)) {
           const email = actor.email?.trim();
           entities = email
             ? (

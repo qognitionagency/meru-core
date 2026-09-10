@@ -1,7 +1,12 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { SelectQueryBuilder } from 'typeorm';
 import { UniversalEntity } from './entities/universal-entity.entity';
-import { Actor, AccessScope, scopeOf } from '../common/access';
+import {
+  Actor,
+  AccessScope,
+  scopeOf,
+  hasTenantWideReach,
+} from '../common/access';
 
 export type CrmAction = 'read' | 'write' | 'delete';
 
@@ -73,6 +78,19 @@ export class CrmAccessService {
   }
 
   /**
+   * Whether this caller reaches the tenant's whole caseload.
+   *
+   * The predicate every narrowing decision in this module asks — see
+   * `common/access.ts`. Exposed as a method, like {@link scopeOf}, so
+   * `CommentService` and anything else built on CRM authorisation keeps going
+   * through this one service rather than importing the free function and
+   * drifting from it.
+   */
+  hasTenantWideReach(actor: Actor): boolean {
+    return hasTenantWideReach(actor);
+  }
+
+  /**
    * The single ownership predicate.
    *
    * Every route that asks "is this record theirs?" comes through here, so
@@ -105,8 +123,7 @@ export class CrmAccessService {
     actor: Actor,
     action: CrmAction = 'read',
   ): boolean {
-    const scope = this.scopeOf(actor);
-    if (scope === 'god' || scope === 'tenant') return true;
+    if (this.hasTenantWideReach(actor)) return true;
 
     // `own` scope: read their own record, change nothing generically.
     if (action !== 'read') return false;
@@ -168,7 +185,7 @@ export class CrmAccessService {
     actor: Actor,
     alias = 'entity',
   ): void {
-    if (this.scopeOf(actor) !== 'own') return;
+    if (this.hasTenantWideReach(actor)) return;
 
     // Same two-condition rule as `ownsEntity`: staff own by assignment, an
     // applicant owns by being the SUBJECT. Compared lower-cased and trimmed,
@@ -200,6 +217,6 @@ export class CrmAccessService {
    * and not the answer.
    */
   mayReadInternalNotes(actor: Actor): boolean {
-    return this.scopeOf(actor) !== 'own';
+    return this.hasTenantWideReach(actor);
   }
 }

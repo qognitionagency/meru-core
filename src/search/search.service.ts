@@ -5,7 +5,7 @@ import { SearchIndex, SearchableType } from './entities/search-index.entity';
 import { ElasticsearchService } from './elasticsearch/elasticsearch.service';
 import type { SearchDocument } from './elasticsearch/interfaces/search.interface';
 import type { SearchResultDto } from './dto/search-result.dto';
-import { Actor, scopeOf } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 
 /** The ES index every CRM entity lands in, per tenant. */
 const ENTITY_INDEX = 'entities';
@@ -269,7 +269,7 @@ export class SearchService {
     results: SearchResultDto[],
     actor?: Actor,
   ): SearchResultDto[] {
-    if (!actor || scopeOf(actor) !== 'own') return results;
+    if (!actor || hasTenantWideReach(actor)) return results;
 
     const actorEmail = actor.email?.trim().toLowerCase();
     return results.filter((r) => {

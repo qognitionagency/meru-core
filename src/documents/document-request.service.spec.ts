@@ -32,14 +32,21 @@ describe('DocumentRequestService', () => {
       checklistThrows?: Error;
       email?: string | null;
       unrendered?: string[];
+      /** `undefined` = the pack declares no upload URL at all. */
+      uploadUrl?: string;
+      recordNumber?: string | null;
+      firstName?: string | null;
+      lastName?: string | null;
     } = {},
   ) {
     const entity = {
       id: CASE,
       tenantId: TENANT,
       type: EntityType.CASE,
-      firstName: 'Ada',
-      lastName: 'Lovelace',
+      recordNumber:
+        opts.recordNumber === undefined ? 'CS-000042' : opts.recordNumber,
+      firstName: opts.firstName === undefined ? 'Ada' : opts.firstName,
+      lastName: opts.lastName === undefined ? 'Lovelace' : opts.lastName,
       email: opts.email === undefined ? 'ada@example.test' : opts.email,
       verticalAttributes: { ...(opts.attributes ?? {}) } as Record<
         string,
@@ -109,12 +116,26 @@ describe('DocumentRequestService', () => {
       }),
     };
 
+    // The pack, reduced to the one key this service reads from it. A pack
+    // that declares no upload URL is a real configuration — GRC ships the same
+    // template and no portal — so it is the default here, not the edge case.
+    const packs = {
+      forVertical: jest.fn(() =>
+        Promise.resolve(
+          opts.uploadUrl === undefined
+            ? { uiConfig: {} }
+            : { uiConfig: { clientDocumentUploadUrl: opts.uploadUrl } },
+        ),
+      ),
+    };
+
     const service = new DocumentRequestService(
       entityRepo as never,
       tenantRepo as never,
       access as never,
       checklist as never,
       notifications as never,
+      packs as never,
     );
 
     return {
@@ -124,6 +145,7 @@ describe('DocumentRequestService', () => {
       access,
       checklist,
       notifications,
+      packs,
       sent,
     };
   }
@@ -252,6 +274,154 @@ describe('DocumentRequestService', () => {
       expect(result.notNotifiedReason).toContain('entityLabel');
       // The request itself still stands.
       expect(result.requestedAt).toBeTruthy();
+    });
+
+    /**
+     * The two variables the pack's `document_request` template declares and
+     * this route did not supply.
+     *
+     * This is what made the refuse-to-send check above fire on **every** real
+     * request: `documentsRequestedAt` was stamped, nothing reached the client,
+     * and the chase sequence arrived days later reminding them about documents
+     * they had never been asked for. The check was right; the missing
+     * variables were the bug.
+     */
+    describe('the variables the pack template actually declares', () => {
+      const varsOf = (h: ReturnType<typeof build>) =>
+        (h.notifications.renderTemplate.mock.calls[0] as unknown[])[2] as Record<
+          string,
+          unknown
+        >;
+
+      it('supplies entityLabel and uploadUrl, so the client is written to', async () => {
+        const h = build({ uploadUrl: 'https://app.immistack.com/client/documents' });
+
+        const result = await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'immigration',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        const variables = varsOf(h);
+        expect(variables.entityLabel).toBe('CS-000042');
+        expect(variables.uploadUrl).toBe(
+          'https://app.immistack.com/client/documents',
+        );
+        expect(result.notified).toBe(true);
+        expect(result.notNotifiedReason).toBeNull();
+      });
+
+      it('reads the upload URL from the pack, never from core', async () => {
+        // Core does not know what a client portal looks like (CLAUDE.md §7.1).
+        // The pack authors the whole URL and this passes it through unchanged
+        // — no base, no appended path, nothing to get wrong per vertical.
+        const h = build({ uploadUrl: 'https://govx-app.vercel.app/en/uploads' });
+
+        await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'grc',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        expect(h.packs.forVertical).toHaveBeenCalledWith('grc');
+        expect(varsOf(h).uploadUrl).toBe('https://govx-app.vercel.app/en/uploads');
+      });
+
+      it('labels by record number, falling back to the applicant name', async () => {
+        const h = build({ recordNumber: null, uploadUrl: 'https://x.test/u' });
+
+        await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'immigration',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        expect(varsOf(h).entityLabel).toBe('Ada Lovelace');
+      });
+
+      it('omits the key rather than sending an empty label', async () => {
+        // The important half. `renderTemplate` does `String(value)` on whatever
+        // it is handed, so `entityLabel: ''` renders as an empty string and
+        // `undefined` renders as the literal text "undefined" — either one
+        // passes the unrendered-variable check and reaches an applicant's
+        // inbox mid-sentence. Absent, the placeholder survives and the send is
+        // refused instead. §7.3, in email form.
+        const h = build({
+          recordNumber: null,
+          firstName: null,
+          lastName: null,
+          uploadUrl: 'https://x.test/u',
+        });
+
+        await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'immigration',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        expect('entityLabel' in varsOf(h)).toBe(false);
+      });
+
+      it('omits uploadUrl when the pack declares none', async () => {
+        // A pack with no client portal keeps exactly today's behaviour —
+        // request recorded, nothing sent, the variable named — rather than
+        // mailing a link into a product that may not exist.
+        const h = build();
+
+        await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'immigration',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        expect('uploadUrl' in varsOf(h)).toBe(false);
+      });
+
+      it('treats a blank upload URL in the pack as no URL', async () => {
+        const h = build({ uploadUrl: '   ' });
+
+        await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'immigration',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        expect('uploadUrl' in varsOf(h)).toBe(false);
+      });
+
+      it('never lets a record attribute overwrite the supplied uploadUrl', async () => {
+        // `verticalAttributes` is spread into the variable map first and is
+        // client-influenced data on some intake paths. It must not be able to
+        // redirect the one link this service sends.
+        const h = build({
+          uploadUrl: 'https://app.immistack.com/client/documents',
+          attributes: { uploadUrl: 'https://attacker.test/harvest' },
+        });
+
+        await h.service.recordRequest({
+          tenantId: TENANT,
+          vertical: 'immigration',
+          actor: staff,
+          entityId: CASE,
+          templateKey: 'document_request',
+        });
+
+        expect(varsOf(h).uploadUrl).toBe(
+          'https://app.immistack.com/client/documents',
+        );
+      });
     });
 
     it('reports honestly when the record has no address to write to', async () => {

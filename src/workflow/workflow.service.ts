@@ -9,7 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
-import { Actor, scopeOf } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
 import * as https from 'https';
 import * as http from 'http';
@@ -363,7 +363,7 @@ export class WorkflowEngineService {
     tenantId: string,
     actor: Actor,
   ): Promise<void> {
-    if (scopeOf(actor) !== 'own') return;
+    if (hasTenantWideReach(actor)) return;
     if (instance.startedBy === actor.id) return;
 
     if (instance.entityId) {
@@ -409,7 +409,7 @@ export class WorkflowEngineService {
     if (status) base.status = status;
     if (entityId) base.entityId = entityId;
 
-    if (scopeOf(actor) === 'own') {
+    if (!hasTenantWideReach(actor)) {
       const owned = await this.ownedEntityIds(tenantId, actor);
       // If the caller asked for a specific `entityId`, the ownership branch
       // may only match when that id is actually theirs — never the full

@@ -6,7 +6,7 @@ import {
   ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { Actor, scopeOf } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 import { StorageDriverRegistry } from './storage-driver.registry';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, Brackets } from 'typeorm';
@@ -768,7 +768,7 @@ export class StorageService {
     // `checkAccess`, so LIST and GET agree: an `own`-scope caller sees what
     // they uploaded, plus anything marked `access: public`. Tenant staff and
     // god-context see everything, same as today.
-    if (scopeOf(filters.actor) === 'own') {
+    if (!hasTenantWideReach(filters.actor)) {
       queryBuilder.andWhere(
         '(file.createdById = :actorId OR file.access = :publicAccess)',
         { actorId: filters.actor.id, publicAccess: FileAccess.PUBLIC },
@@ -1065,7 +1065,7 @@ export class StorageService {
   }
 
   /**
-   * Who may touch a storage file, decided by the same `Actor`/`scopeOf` model
+   * Who may touch a storage file, decided by the same `Actor` access model
    * as documents (`DocumentAccessService`), so the two paths give ONE answer.
    *
    * This used to deny anyone who was not the uploader — the mirror image of
@@ -1090,8 +1090,7 @@ export class StorageService {
     actor: Actor,
     action: 'read' | 'write' | 'delete',
   ): Promise<void> {
-    const scope = scopeOf(actor);
-    if (scope === 'god' || scope === 'tenant') return;
+    if (hasTenantWideReach(actor)) return;
 
     if (file.createdById && file.createdById === actor.id) return;
 

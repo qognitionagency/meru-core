@@ -22,6 +22,7 @@ import {
 import { PolicyGuard } from '../iam/guards/policy.guard';
 import { Roles } from '../iam/decorators/roles.decorator';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
+import { hasTenantWideReach } from '../common/access';
 import { PaymentsService } from './payments.service';
 import { FeeScheduleService } from './fee-schedule.service';
 import {
@@ -63,15 +64,24 @@ export class PaymentsController {
    * resource where the leak would be someone's finances.
    */
   private clientScope(req: AuthenticatedRequest): string | null {
-    const roles = req.user.roles ?? [];
-    const isStaff = roles.some((r) =>
-      [
-        PlatformRole.PLATFORM_ADMIN,
-        PlatformRole.FIRM_ADMIN,
-        PlatformRole.STAFF,
-      ].includes(r as PlatformRole),
-    );
-    return roles.includes(PlatformRole.CLIENT) && !isStaff ? req.user.id : null;
+    // **Allow-list, not deny-list.** This asked "is the caller a client, and
+    // not one of these three staff roles?", so `null` — the whole firm's
+    // ledger, receivable and payable — was the answer for every role this
+    // controller did not recognise. A partner, an agent, a referrer: none of
+    // them are `client`, none of them were staff, and all of them would have
+    // read the firm's entire finances. Asking "does this caller reach the
+    // whole caseload?" instead confines an unrecognised role by construction.
+    //
+    // `hasTenantWideReach` excludes `platform_admin` where the deny-list
+    // included it; that narrowing is deliberate and is explained on
+    // `CrmController.clientScoped`. See `common/access.ts`.
+    return hasTenantWideReach({
+      id: req.user.id,
+      roles: req.user.roles ?? [],
+      email: req.user.email,
+    })
+      ? null
+      : req.user.id;
   }
 
   @Get()

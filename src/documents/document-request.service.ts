@@ -6,6 +6,7 @@ import { Tenant } from '../iam/entities/tenant.entity';
 import { DocumentAccessService } from './document-access.service';
 import { DocumentChecklistService } from './document-checklist.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import type { Actor } from '../common/access';
 
 /**
@@ -92,6 +93,9 @@ export class DocumentRequestService {
     private readonly access: DocumentAccessService,
     private readonly checklist: DocumentChecklistService,
     private readonly notifications: NotificationsService,
+    // Layer 4: `uiConfig.clientDocumentUploadUrl` — the one client-facing
+    // URL this service sends, authored by the pack (see `uploadUrlFor`).
+    private readonly packs: VerticalPackService,
   ) {}
 
   /**
@@ -326,6 +330,54 @@ export class DocumentRequestService {
   }
 
   /**
+   * How this record is named to the client who owns it.
+   *
+   * `recordNumber` first: it is server-assigned (ADR 0010), guaranteed on every
+   * eligible record, never invented, and unmistakably a reference rather than a
+   * name — which is what a sentence like "To move forward with {{entityLabel}}"
+   * wants. The applicant's own name is the fallback, since addressing them by
+   * their case is meaningless if there is no case number yet.
+   *
+   * Returns `null` rather than a stand-in when it has neither. `'Unknown'` or
+   * an empty string in the middle of a client-facing sentence is exactly the
+   * §7.3 mistake — missing data rendered as a result — and here it also
+   * defeats the refuse-to-send check, which is the only thing keeping a
+   * half-filled template out of an applicant's inbox.
+   */
+  private labelFor(entity: UniversalEntity): string | null {
+    if (entity.recordNumber) return entity.recordNumber;
+    const name = `${entity.firstName ?? ''} ${entity.lastName ?? ''}`.trim();
+    return name || null;
+  }
+
+  /**
+   * Where the client uploads what was asked for, read from the pack.
+   *
+   * Core does not know this URL and must not: a client-portal path is the
+   * vertical UI's vocabulary (`/client/documents` on ImmiStack, something else
+   * on GovernanceX), and hardcoding it here — or holding a base URL and
+   * appending a path to it — is precisely what CLAUDE.md §7.1 forbids. The
+   * pack authors the whole string; this reads it and passes it through.
+   *
+   * `null` when the pack declares none, which is a real state: the GRC pack
+   * ships the same `document_request` template and no upload URL, because
+   * whether GovernanceX has a counterparty-facing portal at all is an open
+   * question rather than something to guess at. Those tenants keep today's
+   * behaviour — request recorded, nothing sent, `uploadUrl` named in the
+   * reason — instead of receiving a link into a product that may not exist.
+   */
+  private async uploadUrlFor(vertical: string | null): Promise<string | null> {
+    // Tenant scope: `forVertical` reads the ambient `TenantContext` tenant to
+    // honour a config pin and otherwise serves the vertical's base pack. No
+    // tenant data is read here — a config pack is platform-global — so there
+    // is nothing for RLS to confine and nothing that could cross a tenant.
+    const pack = await this.packs.forVertical(vertical);
+    const url = (pack?.uiConfig as Record<string, unknown> | undefined)
+      ?.clientDocumentUploadUrl;
+    return typeof url === 'string' && url.trim() ? url : null;
+  }
+
+  /**
    * Send the pack template that asks for the documents, if the caller named
    * one.
    *
@@ -390,6 +442,24 @@ export class DocumentRequestService {
         .map((item) => `• ${item.label}`)
         .join('\n'),
     };
+
+    // The two the `document_request` template declares and this route did not
+    // supply — which is the whole defect: the stamp landed, the refuse-to-send
+    // check below fired every time, and the chase arrived days later about
+    // documents nobody had asked for.
+    //
+    // Both are set CONDITIONALLY, never to a placeholder. `renderTemplate`
+    // does `String(value)` on whatever it is handed, so a key present with an
+    // empty or undefined value renders as `''` or the literal `undefined` and
+    // sails past the unrendered-variable check — a client receiving "You can
+    // upload them here: undefined" is the §7.3 failure in email form. Absent,
+    // the placeholder survives, the send is refused, and the reason names the
+    // variable.
+    const label = this.labelFor(entity);
+    if (label) variables.entityLabel = label;
+
+    const uploadUrl = await this.uploadUrlFor(params.vertical);
+    if (uploadUrl) variables.uploadUrl = uploadUrl;
 
     try {
       // Render first, and refuse to send a template this route cannot fully

@@ -925,6 +925,26 @@ export const ConfigPackSchema = z.object({
     supportEmail: z.string().email().optional(),
     termsUrl: HttpUrl.optional(),
     helpUrl: HttpUrl.optional(),
+    /**
+     * Where a client uploads the documents their firm has asked for — the
+     * `{{uploadUrl}}` in the `document_request` template.
+     *
+     * A **complete absolute URL**, authored by the pack, never assembled by
+     * core. `POST /documents/checklist/request` supplies it verbatim and
+     * appends nothing: the path is the vertical UI's (`/client/documents` on
+     * ImmiStack), and a core service that knew that path would be core knowing
+     * what a visa applicant's portal looks like — the 80/20 rule in reverse
+     * (CLAUDE.md §7.1). One key, one string, no templating.
+     *
+     * Optional, and its absence is safe rather than silent:
+     * `DocumentRequestService` renders the template first and **refuses to
+     * send** one declaring a variable it cannot fill, naming the variable. A
+     * pack that omits this still records the request and reports
+     * `notified: false` with `uploadUrl` in the reason. That is the behaviour
+     * that was already there; what was missing was any way for a pack to make
+     * it succeed.
+     */
+    clientDocumentUploadUrl: HttpUrl.optional(),
   }).optional(),
   /**
    * Pack provenance and, critically, its unresolved caveats.

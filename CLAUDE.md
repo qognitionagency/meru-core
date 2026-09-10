@@ -451,8 +451,25 @@ meru-core/
 **https://meru-core.vercel.app** — Vercel `sin1`, project `meru-core`.
 API `/api/v1` · Swagger `/api` · spec `/api-json` · health `/api/v1/health`.
 
-Deploys are **CLI-driven** (`vercel --prod`); pushing to GitHub does *not*
-deploy. There is one remote, `origin` → `qognitionagency/meru-core`.
+Deploys are **CLI-driven *and* git-connected, and which one applies is per
+project.** There is one remote, `origin` → `qognitionagency/meru-core`.
+
+**For `meru-core`, a push to `main` deploys Production.** Re-verified 2026-09-10:
+its live production deployment carries the alias
+`meru-core-git-main-qognitionagencys-projects.vercel.app`, and the `-git-<branch>-`
+alias form only exists when Vercel builds from a connected branch. **So: apply
+migrations first, then push.**
+
+**`immistack-app` has no connected repository** — its production deployment
+(`app.immistack.com`) carries no `-git-` alias at all, so it deploys by CLI only.
+Check per project before assuming either way:
+
+```bash
+vercel inspect <prod-url> --scope qognitionagencys-projects   # look for a -git- alias
+```
+
+`vercel project inspect` does **not** report the git connection; the alias is the
+only reliable tell.
 
 > ### Git integration IS active on some projects — verified 2026-09-07
 >
@@ -534,17 +551,76 @@ npm run migration:run                            # apply migrations (idempotent)
 npm run rls:verify                               # prove isolation
 ```
 
-All three databases sit on the **same Neon endpoint**
-(`ep-restless-thunder-azgspl7m`) — `govx` and `immistack` are database names, not
-separate projects — so the owner URL reaches all three. Run migrations against
-each by overriding `DATABASE_URL` with `GOVX_DB_URL` / `IMMISTACK_DB_URL`.
+**Full procedure: [`docs/runbooks/provision-a-database.md`](runbooks/provision-a-database.md).**
+Read it before provisioning or recovering a database; the summary below is not enough.
+
+> ### The control plane moved on 2026-09-10 — verified, not inherited
+>
+> The paragraph that stood here said all three databases sit on the same Neon
+> endpoint `ep-restless-thunder-azgspl7m`. **That is now wrong.** Read from
+> `meru-core/.env` (host and role only) and cross-checked against `vercel env ls`
+> on 2026-09-10:
+>
+> | Variable | Role | Endpoint | Database |
+> |---|---|---|---|
+> | `DATABASE_URL` | `neondb_owner` | `ep-small-darkness-aeyx0p5j` (`us-east-2`) | `neondb` |
+> | `DATABASE_APP_URL` | `meru_app` | same, direct | `neondb` |
+> | `IMMISTACK_DB_URL` | `neondb_owner` | same, direct | `neondb` — **not yet a separate database** |
+> | `GOVX_DB_URL` | `neondb_owner` | `ep-restless-thunder-azgspl7m` (`ap-southeast-1`) | `govx` |
+>
+> `DATABASE_URL`, `DATABASE_APP_URL`, `IMMISTACK_DB_URL` and `IMMISTACK_DB_APP_URL`
+> were all re-set on Vercel Production that day. **`GOVX_DB_URL` was not** — its
+> Vercel entry is 35 days old and still names the old project. Treat any doc citing
+> `ep-restless-thunder-azgspl7m` as *the* endpoint as predating the cutover.
+>
+> The Vercel function still runs in `sin1` (Singapore, confirmed by `vercel inspect`);
+> the control-plane database is now in `us-east-2` (Ohio). Both used to be in
+> `ap-southeast-1`. Every query is now a trans-Pacific round trip inside a function
+> with `maxDuration: 60` and pool `max: 1`.
+
+**Two connection-string rules. Both failures are silent and total.**
+
+1. **The owner role is for migrations only.** `neondb_owner` holds
+   `rolbypassrls = true` (queried directly, 2026-09-10); `meru_app` does not. A role
+   with `BYPASSRLS` ignores every policy while `\d+` still shows them enabled —
+   the schema looks isolated and is not. `assertRlsEnforceable()` throws at boot
+   under `NODE_ENV=production` if the runtime role holds it. If `DATABASE_APP_URL`
+   is unset the app boots on `DATABASE_URL`, logs a loud error, and **refuses to
+   start under `NODE_ENV=production`**.
+2. **Never use Neon's `-pooler` endpoint.** Tenant context is set with
+   `set_config(…, false)` — session-scoped — so through a transaction pooler the
+   binding leaks to whichever client inherits the backend. Measured 2026-09-10: a
+   fresh pooled connection reported `app.rls_bypassed() = true` and a stale tenant
+   id, and `rls:verify` went **10/10 → 4/10** with every write-containment check
+   failing. `applyRlsToDataSource` now throws at boot on a `-pooler` host
+   (`src/core/tenancy/rls.datasource.ts`). **The two strings are visually identical
+   apart from six characters** — check before pasting.
+
+**The migration chain cannot build a database from scratch.** A fresh
+`migration:run` dies on `schema "app" does not exist`, then `app.has_access`, then
+`app.set_context_fields`: `1743900000000` and `1743910000000` reference both
+functions, **no migration creates either**, and the only `CREATE SCHEMA app` is ten
+migrations later in `1753500000000`. The control plane survived only because it was
+baselined rather than migrated from empty. The supported path is `MigrateService`'s
+`isEmptyDatabase` bootstrap (`src/jobs/migrate.service.ts` — `POST /jobs/migrate/:target`,
+`CronSecretGuard`), which builds from entity metadata and replays the RLS-carrying
+migrations. Its own comment explains why fixing the chain is off the table: doing so
+*"would rewrite history that production already depends on."* Do not re-derive this.
+
+That bootstrap's replay list **had drifted** and shipped a database with no RLS on
+`job_runs` and `tenant_signup_invites` — pre-tenant tables the dynamic `tenantId`
+loop cannot see. It now asserts ENABLE+FORCE coverage before reporting success, and
+throws naming the uncovered tables. **Any new pre-tenant table must be added to that
+list.**
 
 If the schema was created outside TypeORM the `migrations` table is empty and
 TypeORM replays `InitialSchema`, failing `42P07`. Baseline once:
 `node scripts/baseline-migrations.js --apply --through 1744010000000`.
 
-If `DATABASE_APP_URL` is unset the app boots on `DATABASE_URL`, logs a loud
-error, and **refuses to start under `NODE_ENV=production`**.
+Measured on the control plane 2026-09-10: **68 of 68** tenant-scoped public tables
+carry ENABLE **and** FORCE RLS, **74 policies**, `migrations` the one correct
+exception (no `tenantId`), and **47** rows in `migrations` matching 47 files and 47
+`ALL_MIGRATIONS` entries 1:1.
 
 ### 8.4 Scheduled jobs on serverless
 

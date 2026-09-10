@@ -23,7 +23,7 @@ import { FormBuilderService } from './form-builder.service';
 import { PolicyGuard } from '../iam/guards/policy.guard';
 import { Roles } from '../iam/decorators/roles.decorator';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
-import { Actor, scopeOf } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 import { CreateFormDto } from './dto/create-form.dto';
 import { UpdateFormDto } from './dto/update-form.dto';
 import type { FormDefinition } from './form-builder.service';
@@ -52,7 +52,7 @@ export class FormController {
    * and has been removed from here.
    *
    * What is left is a different rule, not tenant isolation: a `client`-role
-   * caller (`scopeOf(actor) === 'own'`) may only reach a submission they
+   * caller (one without `hasTenantWideReach`) may only reach a submission they
    * themselves submitted. That narrows *inside* one tenant rather than across
    * tenants, so it belongs at this layer — the same split
    * `CrmAccessService`/`DocumentAccessService` make between tenant scope and
@@ -63,7 +63,7 @@ export class FormController {
     submission: { submittedBy: string },
     actor: Actor,
   ): void {
-    if (scopeOf(actor) === 'own' && submission.submittedBy !== actor.id) {
+    if (!hasTenantWideReach(actor) && submission.submittedBy !== actor.id) {
       throw new NotFoundException('Submission not found');
     }
   }

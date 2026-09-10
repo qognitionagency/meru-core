@@ -17,8 +17,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Triggers fire regardless of BYPASSRLS.
  *
  * One exception is carved out: `archived`. The retention job
- * (AuditService.archiveOldLogs) flips that flag on rows past the retention
- * window, and it is metadata about storage, not about what happened. Every
+ * (`RetentionService.sweep`, dispatched from `/jobs/tick?scope=daily`) flips
+ * that flag on rows past each tenant's own retention window, and it is
+ * metadata about storage, not about what happened. It named
+ * `AuditService.archiveOldLogs` until that method was deleted — one unbound,
+ * hardcoded-365-day `@Cron` competing with the per-tenant sweep. Every
  * other column is frozen, compared as whole rows so a column added later is
  * protected automatically rather than needing this trigger to be remembered.
  *

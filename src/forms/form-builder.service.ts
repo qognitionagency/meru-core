@@ -23,7 +23,7 @@ import { SearchService } from '../search/search.service';
 import { AiService } from '../ai/ai.service';
 import { DocumentHubService } from '../documents/document-hub.service';
 import { Document } from '../documents/entities/document.entity';
-import { Actor, scopeOf } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 
 export interface FormDefinition {
   name: string;
@@ -410,7 +410,7 @@ export class FormBuilderService {
     // query, not filtered after the fact in the controller, so every future
     // caller of this method inherits it — see the note on `actor` above for
     // the one caller that does not yet supply one.
-    if (actor && scopeOf(actor) === 'own') where.submittedBy = actor.id;
+    if (actor && !hasTenantWideReach(actor)) where.submittedBy = actor.id;
 
     return this.submissionRepo.find({
       where,

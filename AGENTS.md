@@ -4,28 +4,61 @@
 > documentation. Architecture and rules are in [CLAUDE.md](CLAUDE.md); these two
 > files are the entire documentation surface.
 >
-> **Last verified 2026-09-10 (Jonas).** Live production (`meru-core.vercel.app`, `main`)
-> answers **278 paths / 331 operations** on `/api-json` (`curl` this session; 274/326 on
+> **Last verified 2026-09-10 21:25 IST (Jonas).** Live production
+> (`meru-core.vercel.app`, `main`) answers **286 paths / 341 operations** on `/api-json`
+> (`curl` + a path/operation count this session; 278/331 earlier the same day, 274/326 on
 > 2026-09-08, 273/325 on 2026-09-05).
+>
+> **That number moved twice today and a new Production deployment landed while this file was
+> being written.** Re-`curl` it; do not quote this line.
 >
 > The `alerts` prefix that earlier passes flagged as "not traced to a controller" **is
 > traced**: `src/rules/alert-rule.controller.ts:53` declares `@Controller('alerts')` under
 > `@ApiTags('rules')`. The prefix and the tag differ, which is exactly why searching the spec
 > by tag never found it. `/alerts` and `/alerts/resolved`, staff-and-above.
 >
-> **Capabilities: 3 live · 1 degraded · 10 unconfigured · 0 unknown** (14 total), read from
-> the `capabilities` block of the **unauthenticated** `GET /api/v1/health`. The detailed
-> `GET /health/capabilities` returns `MER-AUTH-0001` at HTTP **401** without an operator
-> token — confirmed at runtime today, so that role check is closed in behaviour and not only
-> in source. The old "2 live / 12 unconfigured" figure is superseded.
+> **Capabilities: 3 live · 0 degraded · 11 unconfigured · 0 unknown** (14 total), read from
+> the `capabilities` block of the **unauthenticated** `GET /api/v1/health` at 21:23 IST
+> 2026-09-10. The detailed `GET /health/capabilities` returns `MER-AUTH-0001` at HTTP **401**
+> without an operator token, so that role check is closed in behaviour, not only in source.
+> Both "3 live / 1 degraded / 10 unconfigured" (earlier today) and "2 live / 12 unconfigured"
+> are superseded.
 >
-> `ALL_MIGRATIONS` in `src/config/migrations.ts` counts **46 entries**, matching **46 files**
-> in `src/migrations/` 1:1 (`ls src/migrations/*.ts | grep -v spec | wc -l`) — 43 earlier on
-> 2026-09-10, 41 on 2026-09-08. The four newest — `AddTenantSignupInvites`,
-> `AddRecordNumbering`, `BackfillRecordNumbers`, `AddUserPractitionerCredential` — are
-> **uncommitted** (see the 2026-09-10 blocks below); 42 are committed. Per the operator, the
-> committed ones have been applied to production; not independently checkable from this repo
-> without a DB connection. **Re-count, do not quote — this number has moved twice in one day.**
+> **The one that changed is `screening_lists`, degraded → unconfigured, and it is a safety
+> item.** `watchlist_entries` on the new control-plane database is **empty — 0 rows, counted
+> directly**. The sanctions data did not come across the 2026-09-10 cutover. `CRON_SECRET` is
+> set, so the ingest *can* run; it has not. Until it does, `POST /engines/screening` answers
+> **503 with `listsLoaded: false`** rather than a clean result — it fails closed, which is
+> correct — but **no sanctioned name can match**. Re-run the ingest (§5.1) before anyone
+> trusts a screening result.
+>
+> The remaining 11 unconfigured are the 8 sandbox regulators, `ai` (no `OPENAI_API_KEY` and
+> no tenant connector), `billing` (no `STRIPE_SECRET_KEY`) and `screening_lists`. The 3 live
+> are therefore `mail`, `scheduler` and `storage` — derived by elimination from the summary
+> counts plus `vercel env ls`, not read per-capability, because the detailed route needs an
+> operator token.
+>
+> **`storage` is live, and that is new.** All five S3 variables — `AWS_ACCESS_KEY_ID`,
+> `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `AWS_S3_ENDPOINT`, `AWS_REGION` — are set on
+> Vercel Production (16h old at time of check). **Every doc saying document upload returns a
+> 503 naming missing storage variables is stale**, as is the "operator has chosen Supabase,
+> only `AWS_REGION` is set" story: no `SUPABASE_*` variable exists on Production and S3 is
+> credentialed. `[NEEDS DATA: has an upload/download round trip actually been run against
+> this bucket? Credentialed is not the same as working — the same distinction this file
+> makes about mail.]`
+>
+> **`mail` is live and no customer can receive an email.** `RESEND_API_KEY` and `RESEND_FROM`
+> are set, which is all the capability check tests. The Resend account has **no verified
+> domain**, so every recipient except the account owner is refused (plus-addressed variants
+> too). Onboarding is blocked. Full triage and the fix:
+> [`docs/runbooks/email-delivery.md`](docs/runbooks/email-delivery.md).
+>
+> `ALL_MIGRATIONS` in `src/config/migrations.ts` counts **47 entries**, matching **47 files**
+> in `src/migrations/` 1:1 (`ls src/migrations/*.ts | grep -v spec | wc -l`) — 46 earlier on
+> 2026-09-10, 43 before that, 41 on 2026-09-08. **All 47 are applied to the control plane**:
+> `SELECT count(*) FROM migrations` returns 47, queried directly this session — so the chain,
+> the files and the database now agree three ways. **Re-count, do not quote — this number
+> moved three times in one day.**
 >
 > **DEPLOYED 2026-09-06.** The paragraph that stood here said "NOT YET
 > DEPLOYED… nothing here has merged". That is false and was false for a day:
@@ -41,25 +74,64 @@
 > the tree sat on a full iCloud Drive; it was **never** a jest problem and it is not one
 > now.)*
 >
-> From `~/dev/meru/meru-core`: **77 suites / 953 tests, all green, in ~9 seconds** (measured
-> 2026-09-10 04:06; three consecutive identical runs). `npm run check:cjs` passes — 52 packages,
-> no ESM-only dependency.
+> From `~/dev/meru/meru-core`: **91 suites / 1207 tests, all green, in 8.2 seconds** (measured
+> 2026-09-10 21:26). `npm run check:cjs` passes — 52 packages, no ESM-only dependency.
 >
-> **Do not quote that count.** It moved 75/925 → 76/938 → 77/953 inside twenty minutes because
-> another agent was adding specs to this tree while it was being measured. Run the suite; the
-> number it prints is the number.
+> **Do not quote that count.** It has moved 75/925 → 76/938 → 77/953 → 1206 → 1207 across one
+> day, because other agents add specs to this tree while it is being measured. Run the suite;
+> the number it prints is the number.
 >
 > Treating the test gate as unavailable is how a deployed build went unverified for days.
 >
 > A merged commit is still not a shipped one — check `/api-json`'s path count
 > after any deploy, not the git log.
 >
+> ### The database moved on 2026-09-10 — new Neon project
+>
+> `DATABASE_URL`, `DATABASE_APP_URL`, `IMMISTACK_DB_URL` and `IMMISTACK_DB_APP_URL` were all
+> re-set on Vercel Production that day. The control plane is now
+> **`ep-small-darkness-aeyx0p5j` (`us-east-2`), database `neondb`**; the old
+> `ep-restless-thunder-azgspl7m` (`ap-southeast-1`) is still named by `GOVX_DB_URL`, whose
+> Vercel entry is 35 days old and was **not** cut over. 29 Production variables now, not 23.
+>
+> Two facts that nearly caused incidents, both verified by direct query this session, both
+> written up in [`docs/runbooks/provision-a-database.md`](docs/runbooks/provision-a-database.md):
+>
+> - **`neondb_owner` holds `rolbypassrls = true`; `meru_app` does not.** The owner string is
+>   `DATABASE_URL` (migrations) **only**. Used as the runtime URL it makes RLS inert across
+>   every tenant-scoped table at once, and boot is *supposed* to refuse under
+>   `NODE_ENV=production` (`assertRlsEnforceable`). Do not make that the only control.
+> - **Never Neon's `-pooler` endpoint.** Tenant context uses session-scoped
+>   `set_config(…, false)`, so a transaction pooler leaks the binding — including
+>   `app.bypass_rls` — to the next client. Measured: a fresh pooled connection reported
+>   `app.rls_bypassed() = true` and a stale tenant id; `rls:verify` went **10/10 → 4/10**,
+>   every write-containment check failing. `applyRlsToDataSource` now throws at boot on a
+>   `-pooler` host. **The two connection strings are visually identical apart from six
+>   characters.**
+>
+> Measured on the new database this session: **68 of 68** tenant-scoped public tables carry
+> ENABLE **and** FORCE RLS, **74 policies**, `migrations` the one correct exception. This
+> supersedes the "63 of 64" and "51 tables" figures below.
+>
+> **The operator bootstrap is not optional.** A freshly provisioned control plane has zero
+> users, and there was **no way to sign into `meru-dashboard` at all** until
+> `scripts/seed-demo.js` was run against the new database — `POST /auth/register` is gone,
+> and both supported paths need an authenticated caller or an invite token. The script
+> refuses to run without `DEMO_PASSWORD`, creates `platform@demo.com` as `platform_admin`,
+> and **prints the password to stdout**. `[NEEDS DATA: has `platform@demo.com`'s password
+> been rotated since the seed? It is a `platform_admin` — it reaches every tenant via
+> `runAsGod`.]`
+>
 > `npm run rls:verify` cannot be run locally without `DATABASE_APP_URL` set, and
 > `vercel env pull` returns encrypted values **blank**, so a pulled `.env` looks
-> like the variable is unset when it is not (`.env` does carry it locally as of
-> 2026-09-05). Verify isolation against the deployment with
-> `BASE_URL=… bash scripts/smoke/cross-tenant.sh`, which proves the same
-> property over HTTP with two real tenants.
+> like the variable is unset when it is not. Note it **writes** synthetic rows to whatever
+> database it is pointed at and cleans up afterwards — against production that is a change,
+> not a read. It was **not** re-run against the new database in this pass
+> `[NEEDS DATA: rls:verify result against ep-small-darkness-aeyx0p5j — needs operator
+> confirmation to write to production]`; the read-only coverage query above was used instead,
+> which proves the schema but not the connection. Over HTTP,
+> `BASE_URL=… bash scripts/smoke/cross-tenant.sh` proves the same property with two real
+> tenants.
 >
 > **Additional pass, `harden/authz-golive`, 2026-09-02** — a second class of
 > authorisation gap, not a redeploy: the fifth instance of "a service method

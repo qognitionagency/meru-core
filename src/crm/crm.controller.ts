@@ -46,7 +46,7 @@ import { AddCommentDto } from './dto/add-comment.dto';
 import { LinkEntitiesDto } from './dto/link-entities.dto';
 import { paginated } from '../common/paginated';
 import type { Response } from 'express';
-import { Actor } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 import { ProfileSectionService } from './profile/profile-section.service';
 import { CaseAgingService } from './aging/case-aging.service';
 
@@ -73,19 +73,22 @@ export class CrmController {
    * Forced rather than defaulted: a client cannot widen it by passing
    * `?subjectEmail=` for somebody else. Shared by the list and the export, so
    * an export can never be broader than the list it mirrors.
+   *
+   * **One deliberate behaviour change**, shared with `PaymentsController` and
+   * `CommunicationsController`: the deny-list this replaced counted
+   * `platform_admin` as staff and handed a bare operator token the firm-wide
+   * list. `hasTenantWideReach` does not, and that is the model `common/access.ts`
+   * has documented since it was written — an operator's reach into a tenant's
+   * records is granted by `TenancyService.runAsGod`, which writes the CRITICAL
+   * audit entry that makes the reach legal (CLAUDE.md §7.7), not by the role
+   * string on a token. This can only ever narrow, never widen, and the operator
+   * console does not call `/crm/entities`, `/payments` or
+   * `/communications/threads` at all — it reads `/platform/*` and `/tenants/*`.
    */
   private clientScoped(
     user: UserPayload,
     query: ListEntitiesQueryDto,
   ): ListEntitiesQueryDto {
-    const roles = user.roles ?? [];
-    const isStaff = roles.some((r) =>
-      [
-        PlatformRole.PLATFORM_ADMIN,
-        PlatformRole.FIRM_ADMIN,
-        PlatformRole.STAFF,
-      ].includes(r as PlatformRole),
-    );
     // Scoped by SUBJECT, not by assignee.
     //
     // This forced `assignedTo: user.id`, and `assignedTo` is the *staff*
@@ -100,9 +103,19 @@ export class CrmController {
     // by supplying one. Email rather than user id because a record is created
     // by staff against an applicant's address, often before that applicant
     // has a login at all.
-    return roles.includes(PlatformRole.CLIENT) && !isStaff
-      ? { ...query, subjectEmail: user.email }
-      : query;
+    //
+    // **Allow-list, not deny-list.** This asked "is the caller a client, and
+    // not one of these three staff roles?" and widened to the firm-wide view
+    // for everyone else. That is the wrong question: a role this controller
+    // has never heard of — a partner, an agent, a referrer — was neither
+    // `client` nor staff, so it fell through to `query` unchanged and received
+    // every matter in the firm, `verticalAttributes` and all, plus the CSV
+    // export that shares this helper. Asking instead "does this caller reach
+    // the whole caseload?" puts an unrecognised role in the confined branch by
+    // construction. See `common/access.ts`.
+    return hasTenantWideReach(this.actorFrom(user))
+      ? query
+      : { ...query, subjectEmail: user.email };
   }
 
   /**

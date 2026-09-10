@@ -20,7 +20,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { PolicyGuard } from '../iam/guards/policy.guard';
-import { PlatformRole } from '../iam/enums/platform-role.enum';
+import { hasTenantWideReach } from '../common/access';
 import { ThreadService } from './thread.service';
 import { NotificationType } from './entities/notification.entity';
 import { SendThreadMessageDto } from './dto/notification.dto';
@@ -53,17 +53,23 @@ export class CommunicationsController {
    * `PaymentsController.clientScope`, third resource to need it.
    */
   private clientScope(req: AuthenticatedRequest): string | null {
-    const roles = req.user.roles ?? [];
-    const isStaff = roles.some((r) =>
-      [
-        PlatformRole.PLATFORM_ADMIN,
-        PlatformRole.FIRM_ADMIN,
-        PlatformRole.STAFF,
-      ].includes(r as PlatformRole),
-    );
-    return roles.includes(PlatformRole.CLIENT) && !isStaff
-      ? req.user.email
-      : null;
+    // **Allow-list, not deny-list.** This asked "is the caller a client, and
+    // not one of these three staff roles?", so any role this controller did
+    // not recognise got `null` — every conversation the firm has had with
+    // every client, message bodies included. Asking "does this caller reach
+    // the whole caseload?" instead confines an unrecognised role by
+    // construction.
+    //
+    // `hasTenantWideReach` excludes `platform_admin` where the deny-list
+    // included it; that narrowing is deliberate and is explained on
+    // `CrmController.clientScoped`. See `common/access.ts`.
+    return hasTenantWideReach({
+      id: req.user.id,
+      roles: req.user.roles ?? [],
+      email: req.user.email,
+    })
+      ? null
+      : req.user.email;
   }
 
   @Get('threads')

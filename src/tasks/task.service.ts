@@ -25,7 +25,7 @@ import { SearchService } from '../search/search.service';
 import { AiService } from '../ai/ai.service';
 import { DocumentHubService } from '../documents/document-hub.service';
 import { Document } from '../documents/entities/document.entity';
-import { Actor, scopeOf } from '../common/access';
+import { Actor, hasTenantWideReach } from '../common/access';
 
 export interface CreateTaskDto {
   title: string;
@@ -111,7 +111,7 @@ export class TaskService {
    * uses for documents.
    */
   private assertOwnedByOrTenant(task: Task, actor: Actor): void {
-    if (scopeOf(actor) === 'own' && task.assignedTo !== actor.id) {
+    if (!hasTenantWideReach(actor) && task.assignedTo !== actor.id) {
       throw new NotFoundException('Task not found');
     }
   }
@@ -166,7 +166,7 @@ export class TaskService {
 
     // Wins over whatever `assignedTo` was requested above — see the doc
     // comment on this method.
-    if (scopeOf(actor) === 'own') {
+    if (!hasTenantWideReach(actor)) {
       where.assignedTo = actor.id;
     }
 
@@ -575,7 +575,7 @@ export class TaskService {
     endDate: Date,
     scope: 'mine' | 'firm' = 'mine',
   ): Promise<any[]> {
-    const effectiveScope = scopeOf(actor) === 'own' ? 'mine' : scope;
+    const effectiveScope = hasTenantWideReach(actor) ? scope : 'mine';
     const tasks = await this.taskRepo.find({
       where: {
         tenantId,

@@ -4,7 +4,12 @@ import { Repository, SelectQueryBuilder } from 'typeorm';
 import { Document } from './entities/document.entity';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
 import { Tenant } from '../iam/entities/tenant.entity';
-import { Actor, AccessScope, scopeOf } from '../common/access';
+import {
+  Actor,
+  AccessScope,
+  scopeOf,
+  hasTenantWideReach,
+} from '../common/access';
 import { MeruErrorCode } from '../common/types';
 
 /**
@@ -78,6 +83,18 @@ export class DocumentAccessService {
   }
 
   /**
+   * Whether this caller reaches the tenant's whole document set.
+   *
+   * The predicate every narrowing decision here asks — see `common/access.ts`
+   * for why this is a boolean and not a comparison against `'own'`. Exposed as
+   * a method, like {@link scopeOf}, so `DocumentsService` and
+   * `DocumentHubService` keep sharing one decision.
+   */
+  hasTenantWideReach(actor: Actor): boolean {
+    return hasTenantWideReach(actor);
+  }
+
+  /**
    * The CRM records a caller owns, as ids.
    *
    * Two senses of ownership, and both are needed — the same pair
@@ -143,7 +160,7 @@ export class DocumentAccessService {
     entityId: string,
     actor: Actor,
   ): Promise<void> {
-    if (this.scopeOf(actor) !== 'own') return;
+    if (this.hasTenantWideReach(actor)) return;
 
     const owned = await this.ownedEntityIds(tenantId, actor);
     if (!owned.includes(entityId)) {
@@ -157,8 +174,7 @@ export class DocumentAccessService {
     actor: Actor,
     action: DocumentAction = 'read',
   ): Promise<boolean> {
-    const scope = this.scopeOf(actor);
-    if (scope === 'god' || scope === 'tenant') return true;
+    if (this.hasTenantWideReach(actor)) return true;
 
     // The uploader owns their upload for every action. `rbac.owner` is set to
     // the uploader at creation and is checked too, because a document may be
@@ -216,7 +232,7 @@ export class DocumentAccessService {
     actor: Actor,
     alias = 'document',
   ): Promise<void> {
-    if (this.scopeOf(actor) !== 'own') return;
+    if (this.hasTenantWideReach(actor)) return;
 
     const owned = await this.ownedEntityIds(tenantId, actor);
 

@@ -2,7 +2,7 @@
   "code": "immigration",
   "name": "Immigration Practice Management",
   "description": "Shared immigration vocabulary — every country overlay inherits this.",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "vertical": "immigration",
   "locales": [
     "en"
@@ -913,7 +913,8 @@
     "primaryColor": "#0052A5",
     "supportEmail": "support@immistack.com",
     "termsUrl": "https://immistack.com/terms",
-    "helpUrl": "https://help.immistack.com/au"
+    "helpUrl": "https://help.immistack.com/au",
+    "clientDocumentUploadUrl": "https://app.immistack.com/client/documents"
   },
   "metadata": {
     "author": "Meru Platform Team",

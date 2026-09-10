@@ -97,7 +97,7 @@ export class CommentService {
     // meaningless at best and, if the flag is later trusted to mean the note
     // is theirs to hide, an authorisation gap at worst.
     const internal =
-      this.access.scopeOf(actor) === 'own' ? false : (input.internal ?? false);
+      this.access.hasTenantWideReach(actor) ? (input.internal ?? false) : false;
 
     const saved = await this.entities.save(
       this.entities.create({
@@ -184,7 +184,7 @@ export class CommentService {
     id: string,
     actor: Actor,
   ): Promise<{ deleted: boolean }> {
-    if (this.access.scopeOf(actor) === 'own') {
+    if (!this.access.hasTenantWideReach(actor)) {
       const comment = await this.entities.findOne({
         where: { id, tenantId, type: EntityType.NOTE },
       });

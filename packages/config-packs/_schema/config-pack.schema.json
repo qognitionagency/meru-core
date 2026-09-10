@@ -1622,6 +1622,10 @@
         "helpUrl": {
           "type": "string",
           "format": "uri"
+        },
+        "clientDocumentUploadUrl": {
+          "type": "string",
+          "format": "uri"
         }
       }
     },

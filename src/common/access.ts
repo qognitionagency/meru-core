@@ -86,6 +86,47 @@ export function scopeOf(actor: Actor): AccessScope {
 }
 
 /**
+ * **The predicate every narrowing decision must ask.** True only for a caller
+ * entitled to the tenant's whole caseload; false for everybody else, including
+ * anyone this file has never heard of.
+ *
+ * This exists because `scopeOf` is the right *answer* expressed in a shape that
+ * invites the wrong *question*. Sixteen of nineteen call sites were written as
+ *
+ *     if (scopeOf(actor) !== 'own') return;      // skip narrowing
+ *     if (scopeOf(actor) === 'own') { …narrow… }
+ *
+ * — a deny-list keyed on one value. Both read as correct and both fail OPEN the
+ * moment `AccessScope` gains a fourth member: a scope that is not literally
+ * `'own'` skips the narrowing and receives the firm's entire caseload. Nothing
+ * would flag it, because `scope !== 'own'` stays valid, type-checking code when
+ * the union widens — the compiler has no opinion about a comparison that is
+ * merely now *wrong*. Every one of those sixteen was a list route; the three
+ * that happened to fail closed were by-id checks written as
+ * `scope === 'god' || scope === 'tenant'`, i.e. an allow-list, by accident of
+ * style rather than by rule.
+ *
+ * Expressed as a boolean the fail-open idiom stops being expressible. There is
+ * no fourth branch to forget: a caller either has tenant-wide reach or is
+ * confined to their own records, and a role, scope or portal added tomorrow
+ * lands in the confined branch by construction. Adding reach then becomes a
+ * deliberate edit *here*, in one place, reviewable — which is the property the
+ * partner-portal work needs before it introduces a role at all.
+ *
+ * Exactly equivalent to `scopeOf(actor) !== 'own'` today, so every current token
+ * behaves identically. That equivalence is the point: it is free now and a
+ * migration later.
+ *
+ * `AccessScope`/`scopeOf` stay for the callers that genuinely need to name
+ * *which* wide scope applies (an audit reason, a spec pinning the model). They
+ * are not for branching on `'own'`; `common/allow-list-scoping.spec.ts` fails
+ * the build if that idiom reappears anywhere under `src/`.
+ */
+export function hasTenantWideReach(actor: Actor): boolean {
+  return isGodContext() || isTenantStaff(actor.roles);
+}
+
+/**
  * The caller when no user is asking.
  *
  * Some work inside a tenant genuinely has no user behind it — the AI service

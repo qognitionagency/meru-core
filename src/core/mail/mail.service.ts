@@ -63,6 +63,32 @@ export function inviteUrlFor(appUrl: string, token: string): string {
   return `${appUrl}/reset-password?token=${encodeURIComponent(token)}`;
 }
 
+/**
+ * What an undelivered message may say in a log line — never the body.
+ *
+ * These three log sites used to print `message.text` verbatim, "so an operator
+ * can still recover an action link". The intent was right; the mechanism made
+ * a live credential permanently readable by anyone with project or log-drain
+ * access. An invite body contains `Set your password to get started: <url>`
+ * with the plaintext token in the query string. Invite and signup tokens live
+ * 7 days; a signup token provisions an entire tenant. Password-reset links are
+ * worse still — they target **already-active** accounts including
+ * `platform_admin`, which is exactly the takeover the `INVITED`-only guard on
+ * `resendInvite` exists to prevent, reached through a different door.
+ *
+ * It was not a rare path. With a valid Resend key and no verified sender
+ * domain, Resend rejects every non-owner recipient in the response body, so
+ * the `error` branch above ran on **every** message to a real customer.
+ *
+ * The recovery route is a first-class API response, not a log grep:
+ * `POST /tenants` and `resendInvite` both return `inviteUrl` to an
+ * authenticated caller over TLS. That is the same audience with a far smaller
+ * blast radius.
+ */
+function describeUndelivered(message: MailMessage): string {
+  return `to=${message.to} subject="${message.subject}" (body withheld — contains a credential; use the inviteUrl returned by the API to recover)`;
+}
+
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
@@ -130,7 +156,7 @@ export class MailService {
   async send(message: MailMessage): Promise<{ delivered: boolean }> {
     if (!this.resend) {
       this.logger.warn(
-        `[mail-not-configured] to=${message.to} subject="${message.subject}"\n${message.text}`,
+        `[mail-not-configured] ${describeUndelivered(message)}`,
       );
       return { delivered: false };
     }
@@ -152,8 +178,7 @@ export class MailService {
         this.logger.error(
           `Mail to ${message.to} rejected by Resend: ${error.name} — ${error.message}`,
         );
-        // Log the body so an operator can still recover an action link.
-        this.logger.warn(`[mail-undelivered] ${message.text}`);
+        this.logger.warn(`[mail-undelivered] ${describeUndelivered(message)}`);
         return { delivered: false };
       }
 
@@ -164,7 +189,7 @@ export class MailService {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error(`Mail to ${message.to} failed: ${detail}`);
-      this.logger.warn(`[mail-undelivered] ${message.text}`);
+      this.logger.warn(`[mail-undelivered] ${describeUndelivered(message)}`);
       return { delivered: false };
     }
   }

@@ -2,7 +2,7 @@
   "code": "immigration",
   "name": "Immigration Practice Management",
   "description": "Shared immigration vocabulary — every country overlay inherits this.",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "vertical": "immigration",
   "locales": [
     "en"
@@ -1710,6 +1710,15 @@
       "cardinality": "one_to_many",
       "inverseLabel": "Attached to",
       "blocksCompletion": false
+    },
+    {
+      "key": "dependant_of",
+      "label": "Dependant of",
+      "fromType": "person",
+      "toType": "person",
+      "cardinality": "one_to_many",
+      "inverseLabel": "Dependants",
+      "blocksCompletion": false
     }
   ],
   "navigation": [
@@ -2148,6 +2157,41 @@
           "key": "consultationBookedAt",
           "label": "Consultation Booked",
           "type": "date"
+        },
+        {
+          "key": "intakeChannel",
+          "label": "Capture channel",
+          "type": "text"
+        },
+        {
+          "key": "intakeCampaign",
+          "label": "Campaign",
+          "type": "text"
+        },
+        {
+          "key": "intakeReferrer",
+          "label": "Referrer",
+          "type": "text"
+        },
+        {
+          "key": "intakeLandingPage",
+          "label": "Landing page",
+          "type": "text"
+        },
+        {
+          "key": "intakePartner",
+          "label": "Referring partner",
+          "type": "text"
+        },
+        {
+          "key": "intakeMessage",
+          "label": "Enquiry",
+          "type": "textarea"
+        },
+        {
+          "key": "intakeReceivedAt",
+          "label": "Received",
+          "type": "date"
         }
       ]
     },
@@ -2189,6 +2233,304 @@
           "key": "preferredLanguage",
           "label": "Preferred Language",
           "type": "text"
+        },
+        {
+          "key": "passportExpiry",
+          "label": "Passport expiry",
+          "type": "date"
+        },
+        {
+          "key": "addresses",
+          "label": "Addresses",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "kind",
+              "label": "Kind",
+              "type": "select",
+              "options": [
+                "current",
+                "previous",
+                "mailing"
+              ]
+            },
+            {
+              "key": "line1",
+              "label": "Address line 1",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "line2",
+              "label": "Address line 2",
+              "type": "text"
+            },
+            {
+              "key": "city",
+              "label": "City",
+              "type": "text"
+            },
+            {
+              "key": "state",
+              "label": "State / province",
+              "type": "text"
+            },
+            {
+              "key": "postcode",
+              "label": "Postcode",
+              "type": "text"
+            },
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country",
+              "required": true
+            },
+            {
+              "key": "fromDate",
+              "label": "Resident from",
+              "type": "date"
+            },
+            {
+              "key": "toDate",
+              "label": "Resident to",
+              "type": "date"
+            }
+          ]
+        },
+        {
+          "key": "immigrationHistory",
+          "label": "Immigration history",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country",
+              "required": true
+            },
+            {
+              "key": "status",
+              "label": "Status held",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "fromDate",
+              "label": "From",
+              "type": "date"
+            },
+            {
+              "key": "toDate",
+              "label": "To",
+              "type": "date"
+            },
+            {
+              "key": "notes",
+              "label": "Notes",
+              "type": "textarea"
+            }
+          ]
+        },
+        {
+          "key": "educationHistory",
+          "label": "Education history",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "institution",
+              "label": "Institution",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "qualification",
+              "label": "Qualification",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "fieldOfStudy",
+              "label": "Field of study",
+              "type": "text"
+            },
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country"
+            },
+            {
+              "key": "startDate",
+              "label": "Started",
+              "type": "date"
+            },
+            {
+              "key": "endDate",
+              "label": "Completed",
+              "type": "date"
+            },
+            {
+              "key": "completed",
+              "label": "Completed?",
+              "type": "checkbox"
+            }
+          ]
+        },
+        {
+          "key": "employmentHistory",
+          "label": "Employment history",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "employer",
+              "label": "Employer",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "role",
+              "label": "Role",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country"
+            },
+            {
+              "key": "startDate",
+              "label": "From",
+              "type": "date"
+            },
+            {
+              "key": "endDate",
+              "label": "To",
+              "type": "date"
+            },
+            {
+              "key": "hoursPerWeek",
+              "label": "Hours per week",
+              "type": "number"
+            },
+            {
+              "key": "current",
+              "label": "Current role?",
+              "type": "checkbox"
+            }
+          ]
+        },
+        {
+          "key": "travelHistory",
+          "label": "Travel history",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country",
+              "required": true
+            },
+            {
+              "key": "purpose",
+              "label": "Purpose",
+              "type": "text"
+            },
+            {
+              "key": "arrivalDate",
+              "label": "Arrived",
+              "type": "date"
+            },
+            {
+              "key": "departureDate",
+              "label": "Departed",
+              "type": "date"
+            }
+          ]
+        },
+        {
+          "key": "previousRefusals",
+          "label": "Previous refusals",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country",
+              "required": true
+            },
+            {
+              "key": "visaType",
+              "label": "Visa applied for",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "refusedOn",
+              "label": "Refused on",
+              "type": "date"
+            },
+            {
+              "key": "reason",
+              "label": "Stated reason",
+              "type": "textarea"
+            },
+            {
+              "key": "reference",
+              "label": "Departmental reference",
+              "type": "text"
+            },
+            {
+              "key": "appealed",
+              "label": "Appealed / reviewed?",
+              "type": "checkbox"
+            }
+          ]
+        },
+        {
+          "key": "visaHistory",
+          "label": "Visa history",
+          "type": "set",
+          "itemFields": [
+            {
+              "key": "country",
+              "label": "Country",
+              "type": "country",
+              "required": true
+            },
+            {
+              "key": "visaType",
+              "label": "Visa / subclass",
+              "type": "text",
+              "required": true
+            },
+            {
+              "key": "grantedOn",
+              "label": "Granted",
+              "type": "date"
+            },
+            {
+              "key": "expiresOn",
+              "label": "Expires",
+              "type": "date"
+            },
+            {
+              "key": "status",
+              "label": "Status",
+              "type": "select",
+              "options": [
+                "held",
+                "expired",
+                "cancelled",
+                "withdrawn"
+              ]
+            },
+            {
+              "key": "conditions",
+              "label": "Conditions",
+              "type": "text"
+            }
+          ]
         }
       ]
     },
@@ -2272,6 +2614,43 @@
               ]
             ]
           }
+        },
+        {
+          "key": "stage",
+          "label": "Stage",
+          "type": "select",
+          "options": [
+            "lead",
+            "consultation_booked",
+            "signed_up",
+            "documents_pending",
+            "application_draft",
+            "client_review",
+            "submitted",
+            "additional_info",
+            "granted",
+            "refused"
+          ]
+        },
+        {
+          "key": "applicationRef",
+          "label": "Application reference",
+          "type": "text"
+        },
+        {
+          "key": "biometricsAt",
+          "label": "Biometrics",
+          "type": "date"
+        },
+        {
+          "key": "interviewAt",
+          "label": "Interview",
+          "type": "date"
+        },
+        {
+          "key": "decisionAt",
+          "label": "Decision",
+          "type": "date"
         }
       ]
     },

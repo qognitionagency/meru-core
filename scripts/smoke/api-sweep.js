@@ -66,6 +66,23 @@ const PUBLIC = [
   /^\/auth\/saml\//,
   /^\/tenants\/signup$/,
   /^\/tenants\/check-slug$/,
+  // FR-3.3 website lead capture. `@Public()` by necessity — a firm's website
+  // has no bearer token — and authenticated instead by a per-tenant capture
+  // key (`X-Meru-Intake-Key`), which is why it is not keyed on a tenant slug
+  // the way the two routes above it once were.
+  //
+  // Listed here rather than left to the anonymous check because that check
+  // wants a 401 and this route answers **400** to a junk body: Nest runs
+  // guards before pipes, so `@Public()` lets the request through to the
+  // global ValidationPipe, which rejects a body with no `firstName`/`email`
+  // before the handler ever looks at the key. A well-formed body with no key
+  // does answer 401.
+  //
+  // What this allowlist entry gives up is covered by
+  // `src/crm/intake/lead-intake.spec.ts`: missing, unknown and revoked keys
+  // all answer 401 identically, nothing is written, and the tenant comes from
+  // the key row rather than from anything in the request.
+  /^\/intake\/leads$/,
 ];
 
 /**

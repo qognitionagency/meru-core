@@ -1,6 +1,7 @@
 import {
   IsDateString,
   IsEnum,
+  IsIn,
   IsObject,
   IsOptional,
   IsString,
@@ -148,6 +149,19 @@ export class ListEntitiesQueryDto {
   @ApiPropertyOptional({ default: 50 })
   @IsOptional()
   limit?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'FR-5.10. `true` adds an `aging` object to every row — days in the ' +
+      'current stage and days since the last recorded client contact. Both ' +
+      'are `null` with a stated reason when unknown; **neither is ever 0 ' +
+      'because nothing was found**. Off by default so no existing consumer’s ' +
+      'payload changes, and because it costs one extra query per page.',
+    enum: ['true', 'false'],
+  })
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  withAging?: string;
 }
 
 /**

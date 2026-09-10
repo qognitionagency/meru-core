@@ -878,6 +878,43 @@ export const ConfigPackSchema = z.object({
        * a key nothing enforces is how `rules[]` sat inert for months.
        */
       lockedWhen: z.unknown().optional(),
+      /**
+       * Present ⇒ this field is a **repeating structured set**, not a scalar:
+       * its value is an array of flat objects carrying these keys.
+       *
+       * FR-4.3/FR-4.4 — immigration, education, employment and travel
+       * history, previous refusals and prior visas — are repeating sets, and
+       * "not free text" is a requirement rather than a preference: a refusal
+       * buried in a paragraph cannot be reasoned about, and it changes what
+       * may lawfully be advised.
+       *
+       * Declared here rather than hardcoded in the UI for the usual reason
+       * (CLAUDE.md §7.6): a checklist a firm cannot change without a release
+       * is a checklist that stops matching the jurisdiction.
+       *
+       * ENFORCED, not decorative — `CrmService.createEntity`/`updateEntity`
+       * refuse a write whose entries are not flat objects with declared keys,
+       * and whose pack-required entry fields are absent
+       * (`assertDeclaredSetsValid`, `src/crm/profile/profile-section.service.ts`).
+       * A field WITHOUT `itemFields` is unaffected, so every pack that
+       * predates this key behaves exactly as before.
+       *
+       * On the record: an empty array means the firm answered "none"; an
+       * ABSENT key means nobody has been asked. `GET /crm/entities/:id/profile`
+       * reports those as `declared_none` and `not_recorded` and they must not
+       * render alike.
+       */
+      itemFields: z
+        .array(
+          z.object({
+            key: z.string().min(1),
+            label: z.string(),
+            type: z.string(),
+            required: z.boolean().optional(),
+            options: z.array(z.string()).optional(),
+          }),
+        )
+        .optional(),
     })).default([]),
   })).optional(),
 

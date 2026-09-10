@@ -16,13 +16,36 @@ import { AcceptanceService } from './acceptance.service';
 import { PackRuleModule } from '../rules/pack-rule.module';
 import { RuleEvaluatorModule } from '../rules/rule-evaluator.module';
 import { CrmAccessService } from './crm-access.service';
+import { LeadIntakeKey } from './intake/entities/lead-intake-key.entity';
+import { LeadIntakeSubmission } from './intake/entities/lead-intake-submission.entity';
+import { LeadIntakeService } from './intake/lead-intake.service';
+import {
+  LeadIntakeAdminController,
+  LeadIntakeReceiverController,
+} from './intake/lead-intake.controller';
+import { ProfileSectionService } from './profile/profile-section.service';
+import { CaseAgingService } from './aging/case-aging.service';
+import { Notification } from '../notifications/entities/notification.entity';
 
 // CRM module per CLAUDE.md §2 row 3: polymorphic UniversalEntity.
 // All types (person, organization, case, note, tag, asset) live in one table.
 // Type-specific fields go in verticalAttributes jsonb.
 @Module({
   imports: [
-    TypeOrmModule.forFeature([UniversalEntity, EntityRelation]),
+    TypeOrmModule.forFeature([
+      UniversalEntity,
+      EntityRelation,
+      // FR-3.3 website capture. Registered here rather than in a module of
+      // their own: a captured lead IS a `universal_entities` row, and
+      // `LeadIntakeService` creates it through `CrmService` so it inherits the
+      // record-numbering, required-field and search-indexing behaviour every
+      // other producer gets.
+      LeadIntakeKey,
+      LeadIntakeSubmission,
+      // FR-5.10 reads delivered messages to answer "days since last client
+      // contact". Read-only, and only ever through `CaseAgingService`.
+      Notification,
+    ]),
     TenantModule,
     // `EntityRelationService` reads the pack's `relationships[]`. TenantModule
     // does not export `VerticalPackService`, so without this the app does not
@@ -41,7 +64,12 @@ import { CrmAccessService } from './crm-access.service';
     // reaching through PackRuleModule keeps the dependency explicit.
     RuleEvaluatorModule,
   ],
-  controllers: [CrmController],
+  controllers: [
+    CrmController,
+    // Public — see the controller's own header for why it is separate.
+    LeadIntakeReceiverController,
+    LeadIntakeAdminController,
+  ],
   providers: [
     CrmService,
     EntityRelationService,
@@ -52,6 +80,12 @@ import { CrmAccessService } from './crm-access.service';
     // updateEntity/convertEntity/deleteEntity (grep confirmed before adding
     // it here), so widen `exports` only when a caller actually needs it.
     CrmAccessService,
+    LeadIntakeService,
+    // FR-4.1–4.5 — reports a record against the fields its pack declares, so
+    // "not asked" is never rendered as "none".
+    ProfileSectionService,
+    // FR-5.10 — days in stage, days since last client contact.
+    CaseAgingService,
   ],
   exports: [CrmService, EntityRelationService, CommentService],
 })

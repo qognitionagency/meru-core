@@ -25,6 +25,11 @@ import { Actor } from '../common/access';
 import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import { RuleEvaluatorService } from '../rules/rule-evaluator.service';
 import { SUBJECT_TYPES, claimRecordNumber, seriesFor } from './record-identity';
+import {
+  assertDeclaredSetsValid,
+  PackEntityTypeDeclaration,
+} from './profile/profile-section.service';
+import { STAGE_HISTORY_LIMIT, StageHistoryEntry } from './aging/case-aging.service';
 
 /**
  * Statuses that mean the record is finished. Transitioning *into* one of these
@@ -186,9 +191,90 @@ export class CrmService {
     }
   }
 
+  /**
+   * Hold a write to the shape the pack declares for its repeating sets
+   * (FR-4.3/FR-4.4) — immigration history, refusals, dependants' details.
+   *
+   * Reads the same `entityTypes` section `assertNoLockedFieldChanged` above
+   * does, and fails in the same direction: a pack that declares no
+   * `itemFields` changes nothing, so this is inert for GovernanceX and for
+   * every immigration record whose section the pack has not yet described.
+   */
+  private async assertProfileSetsValid(
+    type: EntityType,
+    incoming: Record<string, unknown> | undefined,
+    vertical: string | null,
+  ): Promise<void> {
+    if (!incoming || Object.keys(incoming).length === 0) return;
+
+    const entityTypes = await this.packs.section<PackEntityTypeDeclaration[]>(
+      vertical,
+      'entityTypes',
+    );
+    const declaration = (entityTypes ?? []).find((e) => e.type === type);
+    if (!declaration) return;
+
+    assertDeclaredSetsValid(declaration, incoming);
+  }
+
+  /**
+   * Record a stage change on the record itself — FR-5.10's "days in current
+   * stage" has to be derived from something, and before this there was
+   * nothing: `verticalAttributes.stage` held the current value and no history,
+   * so the only available answer was the record's age, which measures a
+   * different thing entirely.
+   *
+   * Written to `metadata`, which is **server-owned**: neither `CreateEntityDto`
+   * nor `UpdateEntityDto` declares it, and the global `ValidationPipe` runs
+   * `forbidNonWhitelisted`, so a caller sending `metadata` gets a 400 rather
+   * than a forged history.
+   *
+   * `stage` is a generic property of a workable record, not immigration
+   * vocabulary — workspace CLAUDE.md §7.5 lists it alongside status, dueDate
+   * and assignee as the shape `cases`, `obligations` and `breaches` share. The
+   * VALUES ("lodgement", "remediation") are the pack's, and core never reads
+   * one.
+   */
+  private static recordStageChange(
+    entity: UniversalEntity,
+    merged: Record<string, unknown>,
+    actorId: string | null,
+  ): void {
+    const before = entity.verticalAttributes?.stage;
+    const after = merged.stage;
+    if (typeof after !== 'string' || !after) return;
+    if (before === after) return;
+
+    const metadata = (entity.metadata ?? {}) as Record<string, unknown>;
+    const history = Array.isArray(metadata.stageHistory)
+      ? (metadata.stageHistory as StageHistoryEntry[])
+      : [];
+
+    const entry: StageHistoryEntry = {
+      stage: after,
+      at: new Date().toISOString(),
+      by: actorId,
+    };
+
+    // Newest first, capped. The cap drops the OLDEST entries: "how long has
+    // this been in its current stage" is answered from the newest, and an
+    // unbounded array on a jsonb column is a row that grows without limit.
+    entity.metadata = {
+      ...metadata,
+      stageHistory: [entry, ...history].slice(0, STAGE_HISTORY_LIMIT),
+    };
+  }
+
   async createEntity(
     tenantId: string,
     dto: CreateEntityInput,
+    /**
+     * The caller's vertical, selecting the pack whose `entityTypes[]` declare
+     * the repeating profile sets. Optional so every existing caller keeps
+     * compiling and keeps its behaviour: without it the pack cannot be
+     * consulted and no set shape is enforced.
+     */
+    vertical?: string | null,
   ): Promise<UniversalEntity> {
     this.logger.log(`Creating entity for tenant: ${tenantId}`, {
       entityType: dto.type,
@@ -218,6 +304,14 @@ export class CrmService {
           }
         }
       }
+
+      // Before anything is written: a declared repeating set must arrive in
+      // the shape the pack declares (FR-4.3/FR-4.4).
+      await this.assertProfileSetsValid(
+        dto.type,
+        dto.verticalAttributes,
+        vertical ?? null,
+      );
 
       if (dto.email) {
         const existing = await this.entityRepo.findOne({
@@ -624,6 +718,13 @@ export class CrmService {
     // stand after the merge.
     await this.assertNoLockedFieldChanged(entity, updates, vertical ?? null);
 
+    // …and a declared repeating set must arrive in the declared shape.
+    await this.assertProfileSetsValid(
+      entity.type,
+      updates.verticalAttributes,
+      vertical ?? null,
+    );
+
     const { verticalAttributes, ...rest } = updates;
     Object.assign(entity, rest);
 
@@ -645,10 +746,14 @@ export class CrmService {
     // PATCH that silently deletes data the caller never mentioned is a trap
     // whichever way it is written down.
     if (verticalAttributes) {
-      entity.verticalAttributes = deepMerge(
+      const merged = deepMerge(
         entity.verticalAttributes ?? {},
         verticalAttributes,
       );
+      // Compared BEFORE the assignment, because it reads the old value off the
+      // entity — FR-5.10.
+      CrmService.recordStageChange(entity, merged, actor?.id ?? null);
+      entity.verticalAttributes = merged;
     }
 
     const updated = await this.entityRepo.save(entity);

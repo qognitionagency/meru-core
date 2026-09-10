@@ -1545,7 +1545,39 @@
                 "formula": {
                   "type": "string"
                 },
-                "lockedWhen": {}
+                "lockedWhen": {},
+                "itemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "options": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "label",
+                      "type"
+                    ]
+                  }
+                }
               },
               "required": [
                 "key",

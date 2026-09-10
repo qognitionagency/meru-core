@@ -49,6 +49,8 @@ import { InboundWebhookEndpoint } from '../webhooks/entities/inbound-webhook-end
 import { InboundWebhookEvent } from '../webhooks/entities/inbound-webhook-event.entity';
 import { EntityRelation } from '../crm/entities/entity-relation.entity';
 import { TenantRecordCounter } from '../crm/entities/tenant-record-counter.entity';
+import { LeadIntakeKey } from '../crm/intake/entities/lead-intake-key.entity';
+import { LeadIntakeSubmission } from '../crm/intake/entities/lead-intake-submission.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import {
   Notification,
@@ -99,6 +101,12 @@ export const ALL_ENTITIES = [
   // see the entity's own header — but the schema catalogue must carry it or
   // the govx/immistack DataSources create a database without the table.
   TenantRecordCounter,
+  // FR-3.3 website lead capture. Same reason as the counter above: the
+  // catalogue is what the govx/immistack DataSources build their schema from,
+  // so an entity missing here is a table that exists on the control plane and
+  // nowhere else.
+  LeadIntakeKey,
+  LeadIntakeSubmission,
   // Integrations
   IntegrationAdapter,
   VesselPosition,

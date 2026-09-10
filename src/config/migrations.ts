@@ -43,6 +43,7 @@ import { AddTenantFeeOverrides1756700000000 } from '../migrations/1756700000000-
 import { AddTenantSignupInvites1756800000000 } from '../migrations/1756800000000-AddTenantSignupInvites';
 import { AddRecordNumbering1756900000000 } from '../migrations/1756900000000-AddRecordNumbering';
 import { BackfillRecordNumbers1756910000000 } from '../migrations/1756910000000-BackfillRecordNumbers';
+import { AddLeadIntake1757000000000 } from '../migrations/1757000000000-AddLeadIntake';
 import { AddUserPractitionerCredential1756920000000 } from '../migrations/1756920000000-AddUserPractitionerCredential';
 
 /**
@@ -116,4 +117,9 @@ export const ALL_MIGRATIONS = [
   // FR-1.2 — the practitioner credential the onboarding wizard has been
   // collecting with nowhere to store it.
   AddUserPractitionerCredential1756920000000,
+  // FR-3.3 — the website capture key and its submission log. Registered in
+  // the same commit as the migration file, per the comment at the top of this
+  // array: "migration on disk, missing from ALL_MIGRATIONS" has been a real
+  // production bug four times in this repo.
+  AddLeadIntake1757000000000,
 ];

@@ -47,6 +47,8 @@ import { LinkEntitiesDto } from './dto/link-entities.dto';
 import { paginated } from '../common/paginated';
 import type { Response } from 'express';
 import { Actor } from '../common/access';
+import { ProfileSectionService } from './profile/profile-section.service';
+import { CaseAgingService } from './aging/case-aging.service';
 
 @Controller('crm')
 @ApiTags('crm')
@@ -57,6 +59,8 @@ export class CrmController {
     private readonly comments: CommentService,
     private readonly acceptance: AcceptanceService,
     private readonly packRules: PackRuleService,
+    private readonly profile: ProfileSectionService,
+    private readonly aging: CaseAgingService,
   ) {}
 
   /**
@@ -227,7 +231,14 @@ export class CrmController {
   createEntity(@Request() req: ExpressRequest, @Body() dto: CreateEntityDto) {
     // req.user comes from JWT (has tenantId and vertical)
     const user = req.user as UserPayload;
-    return this.crmService.createEntity(user.tenantId, dto);
+    return this.crmService.createEntity(
+      user.tenantId,
+      dto,
+      // Selects the pack whose `entityTypes[]` declare the repeating profile
+      // sets, so a malformed set is refused on create as well as on PATCH.
+      // PolicyGuard has already resolved it.
+      (req as AuthenticatedRequest).tenantVertical ?? null,
+    );
   }
 
   @Get('entities')
@@ -255,6 +266,19 @@ export class CrmController {
       user.tenantId,
       scoped,
     );
+
+    // FR-5.10 — aging on the list, opt-in. One extra query for the whole page
+    // rather than one per row: this runs on a function with a pool of `max: 1`.
+    if (query.withAging === 'true') {
+      const aging = await this.aging.forEntities(user.tenantId, items);
+      return paginated(
+        items.map((item) => ({ ...item, aging: aging.get(item.id) ?? null })),
+        total,
+        page,
+        limit,
+      );
+    }
+
     return paginated(items, total, page, limit);
   }
 
@@ -567,6 +591,88 @@ export class CrmController {
       (req as AuthenticatedRequest).tenantVertical ?? null,
       id,
     );
+  }
+
+  @Get('entities/:id/profile')
+  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'What this record does and does not carry (FR-4.1–FR-4.5)',
+    description:
+      'The record read back against the fields its config pack declares for ' +
+      'its type — scalar fields, and the **repeating structured sets** ' +
+      '(immigration history, education, employment, travel, previous ' +
+      'refusals, prior visas, dependants’ details).\n\n' +
+      '**Three states, and the middle one is why this route exists.** ' +
+      '`recorded` — something is there. `declared_none` — the firm saved an ' +
+      'EMPTY set, i.e. asked and the answer was none. `not_recorded` — ' +
+      'nobody has answered.\n\n' +
+      '**`not_recorded` must never render as "none", "0" or a clean result.** ' +
+      'On a refusal history that is the difference between "no previous ' +
+      'refusals" and "we never asked", and the two change what may lawfully ' +
+      'be advised (FR-4.4).\n\n' +
+      'To move a set back to `not_recorded`, PATCH the key to `null`; an ' +
+      'empty array means "none", not "unknown". `completeness.percentRecorded` ' +
+      'is `null` — never 0 — when the pack declares nothing for this type, ' +
+      'and `declared: false` says so.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Profile report' })
+  @ApiResponse({ status: 404, description: 'No such record here, or not yours' })
+  async getEntityProfile(
+    @Request() req: ExpressRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    const user = req.user as UserPayload;
+    // Actor-scoped through the same by-id path as every other read: a client
+    // asking for another applicant's profile gets 404, not a redacted answer.
+    const entity = await this.crmService.getEntity(
+      id,
+      user.tenantId,
+      this.actorFrom(user),
+    );
+    return this.profile.report(
+      entity,
+      (req as AuthenticatedRequest).tenantVertical ?? null,
+    );
+  }
+
+  @Get('entities/:id/aging')
+  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Days in stage, days since last client contact (FR-5.10)',
+    description:
+      'Three clocks, reported separately because they measure different ' +
+      'things and one is often unknown:\n\n' +
+      '- `recordAge` — always knowable.\n' +
+      '- `stage` — `days` is **null** unless a transition into the current ' +
+      'stage was actually recorded, with `basis: "unknown"` and a reason. ' +
+      'There is no fallback to the record’s age: a number that measures ' +
+      'something else looks exactly like a real one.\n' +
+      '- `lastClientContact` — the most recent message to the record’s ' +
+      '`subjectEmail` that was **actually sent** (`sentAt`/`deliveredAt`) or ' +
+      'received. A queued or failed message is not contact. **No recorded ' +
+      'contact is `null`, never 0 days.**\n\n' +
+      '`stage.history` is the recorded transitions, newest first. It is ' +
+      'written by the server on `PATCH /crm/entities/:id`; a record last ' +
+      'moved before this shipped has an empty history and therefore an ' +
+      'honest `unknown`.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Aging report' })
+  @ApiResponse({ status: 404, description: 'No such record here, or not yours' })
+  async getEntityAging(
+    @Request() req: ExpressRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    const user = req.user as UserPayload;
+    const entity = await this.crmService.getEntity(
+      id,
+      user.tenantId,
+      this.actorFrom(user),
+    );
+    return this.aging.forEntity(user.tenantId, entity);
   }
 
   @Get('entities/:id/rules')

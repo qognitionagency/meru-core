@@ -33,7 +33,50 @@ const UUID_RE =
  * the cross-tenant read this whole layer exists to prevent. Every acquisition
  * writes both variables unconditionally.
  */
+/**
+ * Refuse a transaction-pooled connection string.
+ *
+ * Everything below rests on one assumption: that a connection checked out of
+ * the pool is a single backend session for the life of the checkout. An
+ * external *transaction* pooler — Neon's `-pooler` endpoint, PgBouncer in
+ * transaction mode — breaks it. The backend is handed to the next client after
+ * each transaction, and `set_config(..., false)` is **session**-scoped, so the
+ * tenant binding travels with it.
+ *
+ * This is not theoretical. It was observed on 2026-09-10: a freshly opened
+ * connection to a `-pooler` host reported `app.rls_bypassed() = true` and a
+ * tenant id left behind by an earlier session. `npm run rls:verify` dropped
+ * from 10/10 to 4/10 — every write-containment check failed — and the same
+ * string on the direct host passed 10/10 immediately. A leaked
+ * `app.bypass_rls = on` disables row-level security entirely for whichever
+ * request inherits that connection.
+ *
+ * Throwing is the only safe response. The failure is silent by construction:
+ * the app starts, queries succeed, and the only symptom is one tenant seeing
+ * another's rows.
+ *
+ * If pooling is ever genuinely needed, the fix is not to relax this — it is to
+ * make the binding transaction-scoped (`set_config(..., true)`) and prove every
+ * query runs inside a transaction, which is a larger change than it sounds.
+ */
+function assertNotTransactionPooled(dataSource: DataSource): void {
+  const opts = dataSource.options as { url?: string; host?: string };
+  const target = opts.url ?? opts.host ?? '';
+  if (!/-pooler\./.test(target)) return;
+
+  const host = /@([^/?]+)/.exec(target)?.[1] ?? target;
+  throw new Error(
+    `Refusing to enable RLS binding against a transaction-pooled host (${host}). ` +
+      `Tenant context is set with session-scoped set_config(), which leaks between ` +
+      `clients through a transaction pooler — including app.bypass_rls, which turns ` +
+      `RLS off for whoever inherits the connection. Use the direct endpoint: drop ` +
+      `"-pooler" from the hostname.`,
+  );
+}
+
 export function applyRlsToDataSource(dataSource: DataSource): DataSource {
+  assertNotTransactionPooled(dataSource);
+
   const driver = dataSource.driver as unknown as {
     obtainMasterConnection: () => Promise<[any, () => void]>;
     __rlsPatched?: boolean;

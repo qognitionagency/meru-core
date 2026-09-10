@@ -36,6 +36,30 @@ describe('rate-limit key cannot be forged', () => {
     expect(code).not.toMatch(/x-tenant-id/i);
   });
 
+  /**
+   * Keying on `req.ip` is only per-caller if Express is told to trust the
+   * proxy. Vercel terminates TLS at its edge, so without this the socket peer
+   * address is the platform's own proxy — identical for every caller — and the
+   * limiter silently becomes ONE GLOBAL BUCKET. That is strictly worse than the
+   * forgeable-header version it replaced: one client can then exhaust the
+   * allowance for every tenant, which converts a credential-stuffing control
+   * into a denial-of-service lever.
+   *
+   * The assertion below that the key contains `req.ip` proves the identifier is
+   * present. It does not prove it varies. This is the test that does.
+   *
+   * `1`, not `true`: Vercel appends exactly one hop and puts the originating
+   * client first. Trusting the whole chain lets a caller prepend their own
+   * `X-Forwarded-For` and pick their own bucket — the same evasion in a new
+   * costume.
+   */
+  it.each(entrypoints)('%s sets trust proxy to exactly one hop', (file) => {
+    const src = readFileSync(file, 'utf8');
+    expect(src).toMatch(/\.set\(\s*['"]trust proxy['"]\s*,\s*1\s*\)/);
+    // `true` would trust a caller-supplied chain.
+    expect(src).not.toMatch(/\.set\(\s*['"]trust proxy['"]\s*,\s*true\s*\)/);
+  });
+
   it.each(entrypoints)('%s still keys on something', (file) => {
     const src = readFileSync(file, 'utf8');
     const keyGen = src.match(/keyGenerator:\s*\(req\)\s*=>\s*\{([\s\S]*?)\n\s{4,6}\},/);

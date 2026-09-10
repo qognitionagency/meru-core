@@ -33,6 +33,22 @@ const { randomUUID, timingSafeEqual } = require('node:crypto');
 // catch, log and report.
 
 const server = express();
+
+// Vercel terminates TLS at its edge and forwards, so the socket peer address
+// Express sees is the platform's proxy — the *same value for every caller*.
+// Without this, `req.ip` is a constant, and the rate limiter (keyed on it since
+// the forgeable `X-Tenant-Id` was removed) degrades from per-caller to one
+// global bucket: a single client can exhaust the whole allowance for every
+// tenant, turning a credential-stuffing control into a denial-of-service lever.
+//
+// `1`, never `true`. Vercel appends exactly one hop, putting the originating
+// client first. Trusting the entire chain would let a caller prepend their own
+// `X-Forwarded-For` and choose their own rate-limit bucket — reintroducing the
+// evasion that removing the header was meant to close, in a new costume.
+//
+// This also fixes `req.ip` for `session-context.util.ts`, which had been
+// reading `x-forwarded-for` by hand to work around exactly this.
+server.set('trust proxy', 1);
 let ready = null;
 
 /**

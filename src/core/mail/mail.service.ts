@@ -31,6 +31,18 @@ export interface MailMessage {
  * never arrived" take a day to diagnose, and the logged link is what lets an
  * operator unblock a user before credentials are sorted out.
  */
+/**
+ * The one place an invite URL is built.
+ *
+ * Exported because `IamService.resendInvite` now returns this link to the
+ * authenticated operator as well as emailing it, and two independently
+ * constructed URLs is how a working email and a broken operator fallback end
+ * up differing by a path segment nobody notices until onboarding fails.
+ */
+export function inviteUrlFor(appUrl: string, token: string): string {
+  return `${appUrl}/accept-invite?token=${encodeURIComponent(token)}`;
+}
+
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
@@ -209,7 +221,7 @@ export class MailService {
     token: string;
     expiresAt: Date;
   }): Promise<{ delivered: boolean }> {
-    const url = `${this.appUrl}/accept-invite?token=${params.token}`;
+    const url = inviteUrlFor(this.appUrl, params.token);
     const expiry = params.expiresAt.toUTCString();
 
     return this.send({

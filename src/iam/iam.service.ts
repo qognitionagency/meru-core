@@ -31,7 +31,7 @@ import {
   canGrantRole,
 } from './enums/platform-role.enum';
 import type { Actor } from '../common/access';
-import { MailService } from '../core/mail/mail.service';
+import { MailService, inviteUrlFor } from '../core/mail/mail.service';
 import { resolveMailBrand } from '../core/mail/mail-brand';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
@@ -872,11 +872,35 @@ export class IamService {
    * invalidates the previous one, so a resend also revokes a link sent to the
    * wrong place.
    */
+  /**
+   * Re-issue a pending invitation, and hand the link back to the operator.
+   *
+   * `inviteUrl` is returned deliberately, over TLS, to a caller who is already
+   * authorised to trigger this — it grants no privilege they did not have one
+   * line earlier. Withholding it only meant the operator also needed access to
+   * the invitee's mailbox, which is exactly the case that fails.
+   *
+   * That case is not hypothetical: on 2026-09-10 a tenant was provisioned on
+   * production with `inviteSent: false`, and there was no way to complete
+   * onboarding at all — the token exists only as a SHA-256 hash in
+   * `auth_tokens`, so it could not be recovered from the database either. Mail
+   * had failed, and the product could not onboard anybody, with no fallback.
+   * ADR 0006 proposed exactly this and it had only ever been built for tenant
+   * *signup* invites, not for user invites.
+   *
+   * Same posture as `mintSignupInvite`. It is not a way to reach an active
+   * account: the guard below refuses anyone who is not still `INVITED`.
+   */
   async resendInvite(
     tenantId: string,
     userId: string,
     invitedBy?: { id: string; name: string },
-  ): Promise<{ email: string; inviteSent: boolean; expiresAt: Date }> {
+  ): Promise<{
+    email: string;
+    inviteSent: boolean;
+    expiresAt: Date;
+    inviteUrl: string;
+  }> {
     const user = await this.userRepo.findOne({
       where: { id: userId, tenantId },
     });
@@ -914,7 +938,12 @@ export class IamService {
 
     this.logger.log(`Re-invited ${user.email} (email delivered: ${delivered})`);
 
-    return { email: user.email, inviteSent: delivered, expiresAt };
+    return {
+      email: user.email,
+      inviteSent: delivered,
+      expiresAt,
+      inviteUrl: inviteUrlFor(this.mailService.appUrl, token),
+    };
   }
 
   /**

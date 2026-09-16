@@ -89,7 +89,9 @@ describe('PackWorkflowService', () => {
     expect(lodge.conditions.jsonLogic).toEqual({
       in: [{ var: 'matter.subclass' }, ['482']],
     });
-    expect(lodge.permissions).toEqual({});
+    // ADR 0027 D2 — permissions always carries a definite `requiresSignOff`;
+    // this step ('review') is not pack-flagged, so it materialises `false`.
+    expect(lodge.permissions).toEqual({ roles: [], requiresSignOff: false });
   });
 
   it('stores an uncompilable condition as unevaluable and reports it', async () => {

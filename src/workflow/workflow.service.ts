@@ -48,6 +48,7 @@ import {
 import { TaskService, CreateTaskDto } from '../tasks/task.service';
 import { FeeScheduleService } from '../billing/fee-schedule.service';
 import { RuleEvaluatorService } from '../rules/rule-evaluator.service';
+import { User } from '../iam/entities/user.entity';
 
 export interface TransitionRequest {
   instanceId: string;
@@ -129,6 +130,11 @@ export class WorkflowEngineService {
     private feeScheduleService: FeeScheduleService,
     private readonly rules: RuleEvaluatorService,
     private readonly auditService: AuditService,
+    // ADR 0027 — the sign-off gate's live `practitionerCredential` read.
+    // Added last, matching this constructor's existing convention of
+    // appending each new dependency at the end.
+    @InjectRepository(User)
+    private readonly usersRepo: Repository<User>,
   ) {}
 
   // ==================== WORKFLOW DEFINITION ====================
@@ -533,6 +539,30 @@ export class WorkflowEngineService {
       throw new BadRequestException('Insufficient permissions');
     }
 
+    // ADR 0027 D3 — the sign-off gate. A live read, not a JWT claim: the
+    // thing being gated (a professional registration) can be revoked, and a
+    // staleness window is the wrong trade for a Code-of-Conduct check that
+    // fires on only the handful of steps a pack author deliberately flags.
+    // `signOffActor` is captured here and reused at the history-push site
+    // below — never re-queried.
+    let signOffActor: Pick<
+      User,
+      'id' | 'practitionerCredential' | 'practitionerCredentialType'
+    > | null = null;
+    if (transition.permissions.requiresSignOff) {
+      signOffActor = await this.usersRepo.findOne({
+        where: { id: request.userId, tenantId: instance.tenantId },
+        select: ['id', 'practitionerCredential', 'practitionerCredentialType'],
+      });
+      if (!signOffActor?.practitionerCredential) {
+        throw new BadRequestException(
+          `Transition to '${transition.toState.name}' requires sign-off by a ` +
+            `registered practitioner. This actor has no recorded practitioner ` +
+            `credential.`,
+        );
+      }
+    }
+
     // The payment gate — "case freeze on non-payment" (parity map §5.1).
     //
     // The pack's `paymentPlans[].blockProgressOnArrears` declares it and WF
@@ -628,6 +658,18 @@ export class WorkflowEngineService {
         triggeredBy: request.automated ? SYSTEM_ACTOR.id : request.userId,
         ...(request.automated
           ? { automated: true, automatedBy: request.automated.by }
+          : {}),
+        // ADR 0027 D4 — present, and only present, when this transition's
+        // requiresSignOff gate was satisfied. `signOffActor` is the row the
+        // gate above already loaded; never re-queried.
+        ...(transition.permissions.requiresSignOff && signOffActor
+          ? {
+              signedOffBy: request.userId,
+              signedOffCredential: {
+                type: signOffActor.practitionerCredentialType!,
+                number: signOffActor.practitionerCredential!,
+              },
+            }
           : {}),
         context: newContext,
       });

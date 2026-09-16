@@ -34,6 +34,7 @@ describe('WorkflowEngineService — AI residency (tenantId passed top-level)', (
       unused, // feeScheduleService
       unused, // rules
       unused, // auditService
+      unused, // usersRepo
     );
   }
 

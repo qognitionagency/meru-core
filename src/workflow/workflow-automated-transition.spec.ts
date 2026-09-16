@@ -84,6 +84,7 @@ describe('WorkflowEngineService.transition — automated attribution & audit (AD
       feeScheduleService as any,
       unused, // rules
       auditService as any,
+      unused, // usersRepo
     );
 
     return { service, instance, auditService };

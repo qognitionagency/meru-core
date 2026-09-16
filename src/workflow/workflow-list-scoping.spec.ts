@@ -171,6 +171,7 @@ describe('WorkflowEngineService.listInstances — list-route actor scoping', () 
       unused, // feeScheduleService
       unused, // rules
       unused, // auditService
+      unused, // usersRepo
     );
 
     return service;

@@ -82,6 +82,20 @@ export class WorkflowInstance {
     automated?: boolean;
     /** e.g. 'sla-watchdog:auto_approve'. Present only alongside `automated`. */
     automatedBy?: string;
+    /**
+     * ADR 0027 — the signing practitioner's userId. Present, and only
+     * present, when this transition's `requiresSignOff` gate was satisfied.
+     * Never `triggeredBy`: a record of WHOSE sign-off satisfied the Code of
+     * Conduct requirement, distinct from who triggered the state change.
+     */
+    signedOffBy?: string;
+    /**
+     * Snapshot of the credential AT THE TIME of sign-off — `practitionerCredential`
+     * is admin-editable with no history of its own, so this is the only
+     * record of what was true when the decision was made, not what the
+     * user row says today.
+     */
+    signedOffCredential?: { type: string; number: string };
     context: Record<string, any>;
   }>;
 

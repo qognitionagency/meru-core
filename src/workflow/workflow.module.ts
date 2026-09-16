@@ -9,6 +9,7 @@ import { WorkflowState } from './entities/workflow-state.entity';
 import { WorkflowTransition } from './entities/workflow-transition.entity';
 import { WorkflowInstance } from './entities/workflow-instance.entity';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
+import { User } from '../iam/entities/user.entity';
 import { SearchModule } from '../search/search.module';
 import { DocumentsModule } from '../documents/documents.module';
 import { AiModule } from '../ai/ai.module';
@@ -31,6 +32,10 @@ import { PackWorkflowService } from './services/pack-workflow.service';
       // in workflow.service.ts), same pattern as `documents.module.ts`'s
       // `DocumentAccessService`.
       UniversalEntity,
+      // ADR 0027 — read-only, for the sign-off gate's live
+      // `practitionerCredential` check. No circular-dependency risk: `User`
+      // imports nothing from `workflow/`.
+      User,
     ]),
     SearchModule,
     forwardRef(() => DocumentsModule),

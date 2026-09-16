@@ -40,6 +40,16 @@ const WorkflowStepSchema = z.object({
   description: z.string().optional(),
   type: z.enum(['form', 'review', 'document', 'payment', 'decision', 'notification', 'api_call']),
   assignedRole: z.string().optional(),
+  /**
+   * ADR 0027 — a transition leaving this step may only be taken by an actor
+   * holding a non-null `practitionerCredential` (checked live at transition
+   * time, not via a pack-declared role — see the ADR for why this narrows
+   * ADR 0001 §7's original `signOffRole` design). Deliberately just a
+   * boolean: ImmiStack has exactly one sign-off-capable practice role today,
+   * so there is nothing to *name* yet. See ADR 0027 §10 for when to add a
+   * `signOffRole` field back.
+   */
+  requiresSignOff: z.boolean().default(false),
   slaHours: z.number().positive().optional(),
   formFields: z.array(FormFieldSchema).optional(),
   transitions: z.array(z.object({

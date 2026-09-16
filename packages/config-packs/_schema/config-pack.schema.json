@@ -385,6 +385,10 @@
                 "assignedRole": {
                   "type": "string"
                 },
+                "requiresSignOff": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "slaHours": {
                   "type": "number",
                   "exclusiveMinimum": 0

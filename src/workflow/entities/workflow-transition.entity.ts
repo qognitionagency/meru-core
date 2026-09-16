@@ -81,6 +81,13 @@ export class WorkflowTransition {
     users: string[];
     requireApproval: boolean;
     approvers: string[];
+    /**
+     * ADR 0027 — this transition may only be taken by an actor holding a
+     * non-null `practitionerCredential` (checked live at transition time).
+     * Absent/false on every transition materialised before this ADR; a pack
+     * step opts in via `requiresSignOff: true`.
+     */
+    requiresSignOff?: boolean;
   };
 
   @Column({ default: true })

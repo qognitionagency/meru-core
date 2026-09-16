@@ -20,6 +20,8 @@ export interface PackWorkflowDefinition {
     description?: string;
     type: string;
     assignedRole?: string;
+    /** ADR 0027 — a transition leaving this step needs a live sign-off gate. */
+    requiresSignOff?: boolean;
     slaHours?: number;
     formFields?: unknown[];
     requiredDocuments?: string[];
@@ -199,7 +201,30 @@ export class PackWorkflowService {
           type: t.condition ? TransitionType.CONDITIONAL : TransitionType.MANUAL,
           conditions,
           actions: [],
-          permissions: step.assignedRole ? { roles: [step.assignedRole] } : {},
+          // ADR 0027 D2 — `requiresSignOff` gates every transition LEAVING a
+          // flagged step — i.e. a pack author places the flag on the step
+          // whose COMPLETION is the regulated act, not on the step that
+          // records its outcome. (Worked example, not yet shipped in any
+          // pack — see below: for AU's `wf_visa_matter`, that is
+          // `lodgement_fee`, because "Charge forwarded to the Department" is
+          // the act of lodging; `lodged` — the step that merely records the
+          // department has since decided — is the wrong place for it.)
+          // Materialised unconditionally (defaults `false`) so a
+          // transition's permissions object always has a definite answer
+          // rather than an absent key a caller must treat as falsy by
+          // convention.
+          //
+          // No pack on disk sets `requiresSignOff: true` today. Per ADR 0027
+          // §9 consequence 4, flagging a step before any tenant has a
+          // credentialed user locks every matter at that step with no escape
+          // hatch — and onboarding does not yet persist a practitioner
+          // credential (E3). Authoring the flag into `au-immigration.json`
+          // is deferred to its own commit once E3 lands; this mechanism
+          // ships ahead of it, inert until a pack actually declares it.
+          permissions: {
+            roles: step.assignedRole ? [step.assignedRole] : [],
+            requiresSignOff: step.requiresSignOff ?? false,
+          },
         });
       }
     }

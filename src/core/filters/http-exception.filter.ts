@@ -129,7 +129,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let code = this.mapStatusToErrorCode(status, httpException);
 
     let message = 'An unexpected error occurred';
-    let details: ValidationErrorDetail[] | undefined;
+    let details: MeruError['details'];
 
     if (httpException) {
       const response = httpException.getResponse();
@@ -142,6 +142,19 @@ export class AllExceptionsFilter implements ExceptionFilter {
           message = message.join('; ');
         }
         details = this.extractValidationDetails(response);
+
+        // A thrower may attach structured data a client must act on — e.g. the
+        // candidate ids when a request is ambiguous. Only an explicit `details`
+        // object is passed through; any other extra key on the body is dropped,
+        // so nothing an exception carries internally leaks by accident.
+        const explicitDetails = (response as any).details;
+        if (
+          !details &&
+          explicitDetails &&
+          typeof explicitDetails === 'object'
+        ) {
+          details = explicitDetails;
+        }
 
         // A thrower may name its own MeruErrorCode rather than accept the
         // generic per-status default — e.g. a 409 that means "this connector

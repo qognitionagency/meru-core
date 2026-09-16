@@ -797,7 +797,7 @@ export class TenantProvisioningService {
       throw new BadRequestException({
         message:
           'More than one pending firm admin invite on this tenant — pass userId',
-        userIds: pendingAdmins.map((u) => u.id),
+        details: { userIds: pendingAdmins.map((u) => u.id) },
       });
     }
     return pendingAdmins[0];

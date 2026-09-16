@@ -103,6 +103,13 @@ export enum MeruErrorCode {
   VALIDATION_INVALID_FORMAT = 'MER-VAL-0003',
   VALIDATION_DUPLICATE = 'MER-VAL-0004',
   VALIDATION_CONSTRAINT = 'MER-VAL-0005',
+  /**
+   * HTTP 400 — `POST /documents/:id/review/decision` (ADR 0025) with
+   * `decision === 'reject'` and no `rejectionReasonKey`, or a key not in the
+   * tenant's resolved `compliance.documentReview.rejectionReasons[]`. The
+   * message names the valid keys and the pack code/version.
+   */
+  VALIDATION_INVALID_ENUM_VALUE = 'MER-VAL-0006',
 
   // Resource (MER-RES-xxxx)
   RESOURCE_NOT_FOUND = 'MER-RES-0001',
@@ -134,8 +141,12 @@ export interface MeruError {
   code: MeruErrorCode;
   /** Human-readable error message */
   message: string;
-  /** Optional validation error details (field-level) */
-  details?: ValidationErrorDetail[];
+  /**
+   * Optional details: field-level validation errors, or a structured object a
+   * thrower attached explicitly as `details` (e.g. candidate ids on an
+   * ambiguous request).
+   */
+  details?: ValidationErrorDetail[] | Record<string, unknown>;
   /** Optional troubleshooting link */
   helpUrl?: string;
 }

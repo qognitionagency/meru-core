@@ -74,6 +74,7 @@ describe('OrchestrationService authorisation', () => {
     cached: false,
     sources: [{ url: 'https://example.gov/rule', title: 'Rule' } as any],
     citationEnforced: true,
+    provenance: { source: 'platform' },
   });
 
   function buildService(searchOverride?: { search: jest.Mock }) {
@@ -91,7 +92,11 @@ describe('OrchestrationService authorisation', () => {
       {} as any,
     );
     const search = searchOverride ?? { search: jest.fn().mockResolvedValue([]) };
-    const aiService = { analyzeEntity: jest.fn().mockResolvedValue(citedInsights()) };
+    const aiService = {
+      analyzeEntity: jest.fn().mockResolvedValue(citedInsights()),
+      semanticSearch: jest.fn().mockResolvedValue([{ id: 'hit-1' }]),
+      execute: jest.fn().mockResolvedValue(citedInsights()),
+    };
     const service = new OrchestrationService(crm, search as any, aiService as any);
     return { service, aiService };
   }
@@ -155,6 +160,31 @@ describe('OrchestrationService authorisation', () => {
       await service.performIntelligentSearch(T, 'passport', {});
 
       expect(search.search).toHaveBeenCalledWith(T, 'passport', 20, undefined);
+    });
+
+    /**
+     * `enrichWithAIAnalysis` used to call `aiService.execute` with NEITHER a
+     * top-level `tenantId` NOR one inside `context` — the sharpest instance
+     * of the class of defect found while auditing every `execute()` caller
+     * for AI data residency: `clientFor(undefined)` silently answered from
+     * the platform key regardless of whether this tenant had connected its
+     * own provider. Fixed by threading `tenantId` through from
+     * `performIntelligentSearch`, which already has it.
+     */
+    it('AI residency: semantic search + AI analysis passes tenantId to execute() top-level, not just via context', async () => {
+      const { service, aiService } = buildService();
+
+      await service.performIntelligentSearch(
+        T,
+        'passport',
+        { searchType: 'semantic', includeAIAnalysis: true },
+        ACTORS.staff,
+      );
+
+      expect(aiService.semanticSearch).toHaveBeenCalledWith(T, 'passport', undefined, 20);
+      expect(aiService.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: T }),
+      );
     });
   });
 });

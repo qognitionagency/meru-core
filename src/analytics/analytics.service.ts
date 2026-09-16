@@ -373,6 +373,14 @@ export class AnalyticsService {
         rowCount: data.length,
         sample: data.slice(0, 10),
       }),
+      // Top-level, not just `context.tenantId` — `AiService.execute` reads
+      // `request.tenantId` for `clientFor` routing (residency). Reached two
+      // ways, both tenant-bound: `AnalyticsController.executeReport` (a
+      // normal authenticated HTTP request) and `processScheduledReports` →
+      // `exportReport` → `executeReport`, the scheduled path, which runs each
+      // report's export under `runTenantBoundSweep`'s per-item
+      // `TenantContext.run({tenantId: report.tenantId})` (ADR 0018).
+      tenantId: report.tenantId,
       context: { tenantId: report.tenantId },
     });
 

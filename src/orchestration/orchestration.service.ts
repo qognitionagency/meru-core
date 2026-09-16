@@ -105,7 +105,7 @@ export class OrchestrationService {
       );
 
       if (options.includeAIAnalysis) {
-        return this.enrichWithAIAnalysis(semanticResults, query);
+        return this.enrichWithAIAnalysis(tenantId, semanticResults, query);
       }
 
       return {
@@ -153,6 +153,11 @@ export class OrchestrationService {
           entityType,
           verticalAttributes: entity.verticalAttributes,
         }),
+        // Top-level — `AiService.execute` reads `request.tenantId` for
+        // `clientFor` routing (residency), not `request.context.tenantId`.
+        // `[UNVERIFIED: no caller of autoCategorizeEntity exists anywhere in
+        // src today — grepped.]`
+        tenantId,
         context: {
           tenantId,
           vertical:
@@ -421,6 +426,7 @@ export class OrchestrationService {
    * result says so rather than carrying an unsourced annotation.
    */
   private async enrichWithAIAnalysis(
+    tenantId: string,
     results: unknown[],
     query: string,
   ): Promise<unknown[]> {
@@ -431,6 +437,14 @@ export class OrchestrationService {
             category: PromptCategory.DATA_EXTRACTION,
             key: 'search_result_enrichment',
             input: JSON.stringify({ result, originalQuery: query }),
+            // Found while auditing `execute()` callers for the same defect
+            // class named elsewhere (top-level `tenantId`, not
+            // `context.tenantId`) — this call had NEITHER: every semantic
+            // search enrichment always used the platform key regardless of
+            // whether the tenant had connected its own provider. Reachable
+            // live via `OrchestrationController` → `performIntelligentSearch`
+            // → here, a normal tenant-bound HTTP request.
+            tenantId,
           });
 
           const cited = insights.sources && insights.sources.length > 0;

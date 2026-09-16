@@ -21,6 +21,18 @@ import { AnalyticsService } from '../analytics/analytics.service';
 import { AuditService } from '../audit/audit.service';
 import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import { ConnectorsService } from '../integrations/services/connectors.service';
+import { TenantContext } from '../core/tenancy/tenant-context';
+
+/**
+ * `AiService.clientFor` now refuses rather than falling to the platform key
+ * when the connection is not actually bound to the tenant being resolved
+ * (`AiTenantContextUnboundError` — see `ai.service.ts`). Every real caller
+ * runs inside a normally tenant-bound HTTP request; this mirrors that for a
+ * test calling `AiService.execute` directly.
+ */
+function bound<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+  return TenantContext.run({ tenantId }, fn);
+}
 
 /**
  * Regression cover for the defect this fixed: `POST /ai/execute` answered
@@ -103,11 +115,13 @@ describe('AiService prompt resolution', () => {
 
     // Resolution succeeded iff we get as far as "no model configured".
     await expect(
-      service.execute({
-        category: PromptCategory.ENTITY_ANALYSIS,
-        input: 'hello',
-        tenantId: 't1',
-      }),
+      bound('t1', () =>
+        service.execute({
+          category: PromptCategory.ENTITY_ANALYSIS,
+          input: 'hello',
+          tenantId: 't1',
+        }),
+      ),
     ).rejects.toThrow(/no AI provider connected/);
   });
 
@@ -120,11 +134,13 @@ describe('AiService prompt resolution', () => {
     });
 
     await expect(
-      service.execute({
-        category: PromptCategory.ENTITY_ANALYSIS,
-        input: 'hello',
-        tenantId: 't1',
-      }),
+      bound('t1', () =>
+        service.execute({
+          category: PromptCategory.ENTITY_ANALYSIS,
+          input: 'hello',
+          tenantId: 't1',
+        }),
+      ),
     ).rejects.toThrow(/no AI provider connected/);
 
     // The pack must not even be consulted — otherwise an override is only a
@@ -200,11 +216,13 @@ describe('AiService prompt resolution', () => {
     // A pack that forgot the flag should still answer rather than 404 on a
     // prompt it plainly contains.
     await expect(
-      service.execute({
-        category: PromptCategory.ENTITY_ANALYSIS,
-        input: 'hello',
-        tenantId: 't1',
-      }),
+      bound('t1', () =>
+        service.execute({
+          category: PromptCategory.ENTITY_ANALYSIS,
+          input: 'hello',
+          tenantId: 't1',
+        }),
+      ),
     ).rejects.toThrow(/no AI provider connected/);
   });
 

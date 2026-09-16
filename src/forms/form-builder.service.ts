@@ -575,6 +575,7 @@ export class FormBuilderService {
       const extraction = await this.aiService.extractFromDocument(
         documentContent,
         form.fields.map((f) => f.key),
+        tenantId,
       );
 
       return {
@@ -613,6 +614,7 @@ export class FormBuilderService {
       const validation = await this.aiService.validateFormData(
         formData,
         validationRules,
+        tenantId,
       );
 
       return {

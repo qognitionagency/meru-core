@@ -718,6 +718,13 @@ export class TaskService {
             status: t.status,
           })),
         }),
+        // Top-level — `AiService.execute` reads `request.tenantId` for
+        // `clientFor` routing (residency), not `request.context.tenantId`.
+        // `[UNVERIFIED: no caller of getPrioritizedTasks exists anywhere in
+        // src today — grepped — so this fix has no live tenant-binding path
+        // to verify against yet. Correct regardless, for whenever a route
+        // reaches it.]`
+        tenantId,
         context: { tenantId, userId },
       });
 
@@ -759,6 +766,10 @@ export class TaskService {
         category: 'workflow_decision' as any,
         key: 'task_suggestion',
         input: JSON.stringify(context),
+        // Top-level — see `getPrioritizedTasks`'s comment above.
+        // `[UNVERIFIED: no caller of suggestTaskFromContext exists anywhere
+        // in src today — grepped.]`
+        tenantId,
         context: { tenantId },
       });
 

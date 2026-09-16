@@ -1056,6 +1056,13 @@ export class WorkflowEngineService {
             description: w.description,
           })),
         }),
+        // Top-level, not just `context.tenantId` — `AiService.execute` reads
+        // `request.tenantId` for `clientFor` routing (residency); `context`
+        // only ever reached prompt templating. `[UNVERIFIED: no caller of
+        // getWorkflowRecommendations exists anywhere in src today — grepped —
+        // so this fix has no live tenant-binding path to verify against yet.
+        // Correct regardless, for whenever a route reaches it.]`
+        tenantId,
         context: { tenantId },
       });
 
@@ -1098,6 +1105,11 @@ export class WorkflowEngineService {
             0,
           ),
         }),
+        // Top-level — see `getWorkflowRecommendations`'s comment above.
+        // `[UNVERIFIED: no caller of analyzeWorkflowPerformance exists
+        // anywhere in src today — grepped — so this fix has no live
+        // tenant-binding path to verify against yet.]`
+        tenantId,
         context: { tenantId },
       });
 

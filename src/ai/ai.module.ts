@@ -10,8 +10,6 @@ import { ScreeningResult } from './entities/screening-result.entity';
 import { RescreeningService } from './engines/rescreening.service';
 import { ScoringEngine } from './engines/scoring.engine';
 import { DocIntelEngine } from './engines/doc-intel.engine';
-import { DecisionEngine } from './engines/decision.engine';
-import { CommsEngine } from './engines/comms.engine';
 import { RegulatoryRadarEngine } from './engines/regulatory-radar.engine';
 import { VesselTrackingEngine } from './engines/vessel-tracking.engine';
 import { AiPrompt, AiEmbedding } from './entities/ai-prompt.entity';
@@ -64,8 +62,6 @@ import { IntegrationsModule } from '../integrations/integrations.module';
     ScreeningEngine,
     WatchlistIngestService,
     DocIntelEngine,
-    DecisionEngine,
-    CommsEngine,
     RegulatoryRadarEngine,
     VesselTrackingEngine,
   ],
@@ -76,8 +72,6 @@ import { IntegrationsModule } from '../integrations/integrations.module';
     ScreeningEngine,
     WatchlistIngestService,
     DocIntelEngine,
-    DecisionEngine,
-    CommsEngine,
     RegulatoryRadarEngine,
     VesselTrackingEngine,
   ],

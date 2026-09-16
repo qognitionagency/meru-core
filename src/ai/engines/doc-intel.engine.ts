@@ -1,7 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { OpenAI } from 'openai';
+import { AiService, type AiProvenance } from '../ai.service';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +56,14 @@ export interface DocIntelResult {
   contentHash: string;
   processedAt: Date;
   modelUsed: string;
+  /**
+   * Which AI credential answered this extraction — the same evidence
+   * `AiResponse.provenance` carries. `null` when `modelUsed` is `stub` or
+   * `heuristic`: no document content left this process at all, which is its
+   * own, stronger residency answer and is not conflated with either
+   * provenance value here.
+   */
+  provenance: AiProvenance | null;
 }
 
 // ── Field specs per kind ──────────────────────────────────────────────────
@@ -173,16 +181,26 @@ const EXTRACTION_SPECS: Record<DocumentKind, string[]> = {
 @Injectable()
 export class DocIntelEngine {
   private readonly logger = new Logger(DocIntelEngine.name);
-  private readonly openai: OpenAI | null;
 
   // SHA-256 hashes only — no document content stored in memory.
   // Production: persist to Redis or a dedicated table for cross-session dedup.
   private readonly seenHashes = new Set<string>();
 
-  constructor(private readonly configService: ConfigService) {
-    const apiKey = configService.get<string>('OPENAI_API_KEY');
-    this.openai = apiKey ? new OpenAI({ apiKey }) : null;
-  }
+  /**
+   * Data residency, not just wiring.
+   *
+   * This engine used to build its own `OpenAI` client at constructor time off
+   * a bare `OPENAI_API_KEY` — a process-lifetime singleton with no idea which
+   * tenant's request it was serving. A tenant that connected its own provider
+   * specifically so passports, payslips and health assessments never left for
+   * OpenAI (`PUT /integrations/connectors/openai` — self-hosted, DeepSeek,
+   * whatever the corridor's residency rule requires) still had every document
+   * sent to the platform's own account regardless. `AiService.clientFor`
+   * resolves the tenant's connector first and never falls through to the
+   * platform key once one is found; this engine now asks it per-request
+   * instead of holding a client of its own.
+   */
+  constructor(private readonly ai: AiService) {}
 
   async process(request: DocIntelRequest): Promise<DocIntelResult> {
     const startMs = Date.now();
@@ -203,15 +221,57 @@ export class DocIntelEngine {
     // 2. EXIF / format checks
     fraudSignals.push(...this.checkExifAnomalies(request));
 
-    // 3. AI extraction
+    // 3. AI extraction — resolved per request, per tenant. Tenant scope:
+    // `request.tenantId` comes from the caller's JWT
+    // (`EnginesController.processDocument`), never the request body.
     let extractedFields: ExtractedField[] = [];
     let rawText = '';
     let overallConfidence = 0;
     let modelUsed = 'stub';
+    let provenance: AiProvenance | null = null;
 
-    if (this.openai && (request.base64Image || request.fileUrl)) {
+    let client: OpenAI | null = null;
+    if (request.base64Image || request.fileUrl) {
       try {
-        const result = await this.extractWithVision(request);
+        const resolved = await this.ai.clientFor(request.tenantId);
+        client = resolved.client;
+        provenance = { source: resolved.source };
+      } catch (err: unknown) {
+        // Only ONE signal legitimately degrades to the heuristic path:
+        // `clientFor` throwing its own `ServiceUnavailableException` means
+        // nothing is configured anywhere — no tenant connector, no platform
+        // key — the same state `!this.openai` used to represent, and the
+        // 0.45-confidence heuristic result (routed to human review by
+        // `overallConfidence`'s own cap) is the honest answer to that.
+        //
+        // Any OTHER error — `AiTenantContextUnboundError` (the connection is
+        // not actually bound to this tenant, so a real connector's presence
+        // or absence could not be trusted either way), an undecryptable
+        // connector row, a network failure resolving one — means a real
+        // client might exist and simply could not be reached or trusted.
+        // §7.3: silently substituting the heuristic path there would render
+        // "this tenant's document pipeline is broken" as an ordinary
+        // low-confidence extraction, indistinguishable from a genuinely
+        // unconfigured tenant. Fail the request instead of guessing.
+        if (err instanceof ServiceUnavailableException) {
+          this.logger.warn(
+            `No AI client available for tenant ${request.tenantId}: ` +
+              err.message,
+          );
+        } else {
+          this.logger.error(
+            `AI client resolution failed for tenant ${request.tenantId} — ` +
+              `refusing to fall back to the heuristic path for this: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+          throw err;
+        }
+      }
+    }
+
+    if (client) {
+      try {
+        const result = await this.extractWithVision(request, client);
         extractedFields = result.fields;
         rawText = result.rawText;
         overallConfidence = result.confidence;
@@ -231,9 +291,13 @@ export class DocIntelEngine {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(
-          `Vision extraction failed for ${request.documentId}: ${msg}`,
+          `Vision extraction via ${provenance?.source} failed for ${request.documentId}: ${msg}`,
         );
         modelUsed = 'error';
+        // A failed call against a resolved tenant connector must not retry
+        // against the platform key — that is exactly the residency bypass
+        // this pass closes. The extraction is reported failed, not silently
+        // re-routed; provenance stays set so the failure is attributable.
       }
     } else {
       // No vision API or no image — apply heuristic regex extraction.
@@ -245,12 +309,13 @@ export class DocIntelEngine {
           Math.max(extractedFields.length, 1)) *
         0.45;
       modelUsed = 'heuristic';
+      provenance = null;
     }
 
     const fraudRisk = this.computeFraudRisk(fraudSignals);
 
     this.logger.log(
-      `DocIntel ${request.documentId} kind=${request.kind} conf=${overallConfidence.toFixed(2)} risk=${fraudRisk} ${Date.now() - startMs}ms`,
+      `DocIntel ${request.documentId} kind=${request.kind} conf=${overallConfidence.toFixed(2)} risk=${fraudRisk} provenance=${provenance?.source ?? 'none'} ${Date.now() - startMs}ms`,
     );
 
     return {
@@ -264,12 +329,16 @@ export class DocIntelEngine {
       contentHash,
       processedAt: new Date(),
       modelUsed,
+      provenance,
     };
   }
 
   // ── Vision extraction ─────────────────────────────────────────────────────
 
-  private async extractWithVision(request: DocIntelRequest): Promise<{
+  private async extractWithVision(
+    request: DocIntelRequest,
+    client: OpenAI,
+  ): Promise<{
     fields: ExtractedField[];
     rawText: string;
     confidence: number;
@@ -302,7 +371,7 @@ Never invent values. Set null if a field is absent. If you suspect tampering, se
             image_url: { url: request.fileUrl!, detail: 'high' },
           };
 
-    const response = await this.openai!.chat.completions.create({
+    const response = await client.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: systemPrompt },

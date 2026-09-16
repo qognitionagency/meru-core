@@ -31,6 +31,84 @@ import { ConnectorsService } from '../integrations/services/connectors.service';
 import type { PackPrompt } from '../../packages/config-packs/_schema/pack.schema';
 import { Actor, SYSTEM_ACTOR, hasTenantWideReach } from '../common/access';
 import type { UpsertPromptDto } from './dto/ai-request.dto';
+import { TenantContext } from '../core/tenancy/tenant-context';
+
+/**
+ * `clientFor(tenantId)` is about to ask "does this tenant have its own AI
+ * connector, or does it fall to the platform key" — and that question is
+ * only answerable if the connection actually looking is bound to that
+ * tenant. `ConnectorsService.resolveAiProvider` reads `tenant_connectors`
+ * through RLS, and RLS filters by the SESSION's bound tenant
+ * (`app.current_tenant_id`), not by the `tenantId` argument in the query —
+ * so a connection that is unbound, bound to a different tenant, or running
+ * under a `runAsSystem`/`runAsGod` bypass can have a real connector row and
+ * still see `resolveAiProvider` answer `null`, which `clientFor` would
+ * otherwise read as "no connector, use the platform key". That misreading is
+ * exactly the residency bypass this class exists to make impossible: thrown
+ * instead of silently falling through, whatever the caller does with it.
+ *
+ * A `runAsSystem`/`runAsGod` bypass is refused rather than admitted, even
+ * though both are legitimate elsewhere in this codebase — an AI call made
+ * under either would be answering "no connector" from a connection that is
+ * not looking at this tenant's rows at all, which is worse than refusing.
+ * There is no known legitimate AI call site that needs to run under a
+ * bypass; every real caller (`AiController`, `EnginesController`'s doc-intel
+ * route, and the services above them) runs inside a normally tenant-bound
+ * HTTP request.
+ */
+export class AiTenantContextUnboundError extends Error {
+  constructor(
+    readonly requestedTenantId: string,
+    readonly boundTenantId: string | undefined,
+    readonly bypassed: boolean,
+  ) {
+    super(
+      `AI client resolution for tenant ${requestedTenantId} refused: ` +
+        (bypassed
+          ? 'the connection is running under a system/god bypass, not bound to that tenant'
+          : boundTenantId
+            ? `the connection is bound to a different tenant (${boundTenantId})`
+            : 'the connection has no tenant context bound at all') +
+        '. Refusing rather than risking a residency-scoped tenant\'s data ' +
+        'reaching the platform key because its own connector lookup could ' +
+        'not be trusted to have looked at the right rows.',
+    );
+    this.name = 'AiTenantContextUnboundError';
+  }
+}
+
+/**
+ * `clientFor(undefined)` used to mean "skip the tenant-connector lookup
+ * entirely and go straight to the platform key" — silently correct for the
+ * one genuinely tenant-less caller (there was none, once every real call
+ * site was audited: every `execute()`/`createEmbedding()`/`semanticSearch()`
+ * caller in `src` either has a JWT-derived tenant (`AiController`, always
+ * non-optional) or a tenant loaded from a tenant-scoped row) and silently
+ * wrong for every other one — a caller that HAS a tenant but forgot to pass
+ * it reached the platform key with no error at all, which is exactly the
+ * shape the top-level-vs-`context`-only defect took at eight call sites
+ * across `documents`, `workflow`, `analytics`, `tasks` and `orchestration`.
+ *
+ * Thrown instead. There is no known legitimate platform-wide (no-tenant) use
+ * of `execute()`/`createEmbedding()`/`semanticSearch()`/`DocIntelEngine` in
+ * this codebase — if one is ever added deliberately, it should call
+ * `clientFor` some other way (a `forPlatform()` variant, say), not by
+ * omitting `tenantId` and relying on this method's default.
+ */
+export class AiTenantIdRequiredError extends Error {
+  constructor() {
+    super(
+      'AI client resolution refused: no tenantId was supplied at all. ' +
+        'Every known caller has a real tenant available — this almost ' +
+        'certainly means it was passed only inside `context.tenantId` ' +
+        '(prompt templating) rather than top-level `AiRequest.tenantId` ' +
+        '(what clientFor actually routes on), or the caller has not been ' +
+        'audited yet. Refusing rather than silently answering from the ' +
+        'platform key on behalf of an unidentified tenant.',
+    );
+    this.name = 'AiTenantIdRequiredError';
+  }
+}
 
 /**
  * A prompt the gateway can execute, whichever layer it came from.
@@ -76,6 +154,19 @@ export interface AiResponse {
   cached: boolean;
   sources: AiCitation[]; // mandatory — empty = response will be suppressed
   citationEnforced: boolean; // true = passed citation check; false = fallback applied
+  /**
+   * Which credential answered this request. `clientFor` has always computed
+   * this and it was discarded on every path — which meant a tenant that
+   * pinned a self-hosted provider for data-residency reasons had no way to
+   * confirm its case data did not go to the platform's own OpenAI key.
+   * `tenant_connector` = `PUT /integrations/connectors/openai`;
+   * `platform` = the deployment's `OPENAI_API_KEY`.
+   */
+  provenance: AiProvenance;
+}
+
+export interface AiProvenance {
+  source: 'tenant_connector' | 'platform';
 }
 
 export interface CrossModuleContext {
@@ -205,30 +296,58 @@ export class AiService {
     });
   }
 
+  /**
+   * `tenantId` is required, not optional — added while auditing every
+   * `execute()` caller for the top-level-vs-`context`-only residency defect
+   * (this method had neither). `form-builder.service.ts`'s
+   * `extractFormDataWithAI` already has a tenant in scope (it uses it to
+   * load the form) and simply never threaded it through; fixed there too.
+   * `[UNVERIFIED: extractFormDataWithAI has no caller anywhere in src today
+   * — grepped — so this fix has no live tenant-binding path to verify
+   * against yet.]`
+   */
   async extractFromDocument(
     documentContent: string,
     fields: string[],
+    tenantId: string,
   ): Promise<AiResponse> {
     return this.execute({
       category: PromptCategory.DATA_EXTRACTION,
       key: 'document_extraction',
       input: documentContent,
-      context: { fields },
+      context: { fields, tenantId },
+      tenantId,
     });
   }
 
+  /** Same fix, same reasoning, as `extractFromDocument` immediately above. */
   async validateFormData(
     formData: Record<string, any>,
     validationRules: any[],
+    tenantId: string,
   ): Promise<AiResponse> {
     return this.execute({
       category: PromptCategory.VALIDATION,
       key: 'form_validation',
       input: JSON.stringify(formData),
-      context: { validationRules },
+      context: { validationRules, tenantId },
+      tenantId,
     });
   }
 
+  /**
+   * Data residency, not just availability: this used to call
+   * `this.openaiClient` directly — the platform singleton — regardless of
+   * whether the tenant had connected its own provider. A tenant that pinned a
+   * self-hosted endpoint specifically so case text never left for a US
+   * OpenAI account was still sending it there on every embed. Routed through
+   * `clientFor` now, which resolves the tenant's own connector first and
+   * never falls back to the platform key once one is found (see `clientFor`'s
+   * own doc comment) — an embed against a connector that cannot reach
+   * `/embeddings` (DeepSeek has none — CLAUDE.md §8.7) fails rather than
+   * silently retrying on the platform key. That is the correct fail-closed
+   * behaviour, not a regression to fix around.
+   */
   async createEmbedding(
     tenantId: string,
     text: string,
@@ -236,19 +355,10 @@ export class AiService {
     resourceId: string,
     metadata: Record<string, any> = {},
   ) {
-    if (!this.openaiClient) {
-      // 503, not a bare Error. An unset OPENAI_API_KEY is a deployment gap,
-      // not a bug in the request — a 500 tells the caller they broke something
-      // and tells the on-call engineer to look for a crash. 503 says the
-      // dependency is missing, which is what is actually true and what a
-      // client should retry against.
-      throw new ServiceUnavailableException(
-        'AI is not configured on this deployment (OPENAI_API_KEY unset).',
-      );
-    }
+    const { client, source } = await this.clientFor(tenantId);
 
     try {
-      const response = await this.openaiClient.embeddings.create({
+      const response = await client.embeddings.create({
         model: 'text-embedding-3-small',
         input: text,
       });
@@ -267,32 +377,26 @@ export class AiService {
 
       await this.embeddingRepo.save(embedding);
 
-      return { embeddingId: embedding.id, vectorId };
+      return { embeddingId: embedding.id, vectorId, provenance: { source } };
     } catch (error: unknown) {
-      this.logger.error(`Failed to create embedding: ${errorMessage(error)}`);
+      this.logger.error(
+        `Failed to create embedding via ${source} for tenant ${tenantId}: ${errorMessage(error)}`,
+      );
       throw error;
     }
   }
 
+  /** Same residency reasoning as `createEmbedding`, immediately above. */
   async semanticSearch(
     tenantId: string,
     query: string,
     type?: string,
     limit: number = 5,
   ): Promise<any[]> {
-    if (!this.openaiClient) {
-      // 503, not a bare Error. An unset OPENAI_API_KEY is a deployment gap,
-      // not a bug in the request — a 500 tells the caller they broke something
-      // and tells the on-call engineer to look for a crash. 503 says the
-      // dependency is missing, which is what is actually true and what a
-      // client should retry against.
-      throw new ServiceUnavailableException(
-        'AI is not configured on this deployment (OPENAI_API_KEY unset).',
-      );
-    }
+    const { client, source } = await this.clientFor(tenantId);
 
     try {
-      const queryResponse = await this.openaiClient.embeddings.create({
+      const queryResponse = await client.embeddings.create({
         model: 'text-embedding-3-small',
         input: query,
       });
@@ -311,7 +415,9 @@ export class AiService {
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit);
     } catch (error: unknown) {
-      this.logger.error(`Semantic search failed: ${errorMessage(error)}`);
+      this.logger.error(
+        `Semantic search via ${source} for tenant ${tenantId} failed: ${errorMessage(error)}`,
+      );
       throw error;
     }
   }
@@ -529,30 +635,88 @@ export class AiService {
    *
    * Not cached: a key revoked in the UI must stop working on the next request,
    * and one connector lookup is cheap next to a model call.
+   *
+   * **Fail closed, not fail over.** A tenant row with a connector is resolved
+   * and returned immediately — there is no branch anywhere below that falls
+   * through to the platform key once a tenant connector is found, including
+   * on an error constructing the client or calling the model. A residency
+   * requirement met "usually" is not met. `DocIntelEngine`, `createEmbedding`
+   * and `semanticSearch` all resolve their client through this one method
+   * rather than each holding their own `OPENAI_API_KEY` singleton, which is
+   * what let them bypass a tenant's connector entirely before this pass.
+   *
+   * Public (not `private`) so `DocIntelEngine` — a sibling provider in this
+   * module that sends whole documents (passports, payslips, health
+   * assessments) to a vision model — resolves its client the same way rather
+   * than holding its own constructor-time `OPENAI_API_KEY` singleton, which
+   * is exactly the residency bypass this method exists to close.
+   *
+   * **The real scope of the residency guarantee, stated plainly, because it
+   * is narrower than "call `execute()` and you're covered" sounds:**
+   * `AiService.execute(request: AiRequest)` reads `request.tenantId` — the
+   * TOP-LEVEL field — for the `clientFor` call inside `executeOpenAI`.
+   * `request.context.tenantId` is a DIFFERENT thing: it only ever reaches
+   * `{{TENANT_ID}}`-style prompt templating (`buildPrompt`), never this
+   * method. A caller that builds `{ ..., context: { tenantId } }` and omits
+   * the top-level field looks correct — the tenant id is right there in the
+   * request — and residency is silently absent for it: `clientFor` used to
+   * receive `undefined` and answer from the platform key with no error at
+   * all. Found live at eight call sites (`documents/document-hub.service.ts`
+   * ×3, `workflow/workflow.service.ts` ×2, `orchestration/
+   * orchestration.service.ts` ×2 — one of which, `enrichWithAIAnalysis`, had
+   * NEITHER form and was reachable from a real HTTP route — `analytics/
+   * analytics.service.ts` ×1) before this pass fixed each one to also set
+   * the top-level field. `clientFor(undefined)` now throws
+   * `AiTenantIdRequiredError` rather than repeating that mistake silently for
+   * whatever call site is found, or written, next.
    */
-  private async clientFor(tenantId?: string): Promise<{
+  async clientFor(tenantId?: string): Promise<{
     client: OpenAI;
     defaultModel: string | null;
     source: 'tenant_connector' | 'platform';
   }> {
-    if (tenantId) {
-      const provider = await this.connectors.resolveAiProvider(tenantId);
-      if (provider?.apiKey || provider?.baseUrl) {
-        return {
-          client: new OpenAI({
-            // An OpenAI-compatible endpoint may legitimately need no key (a
-            // self-hosted vLLM on a private network). The SDK still requires a
-            // non-empty string, so send a placeholder rather than refusing a
-            // valid configuration.
-            apiKey: provider.apiKey ?? 'not-required',
-            baseURL: provider.baseUrl ?? undefined,
-            maxRetries: 3,
-            timeout: 30000,
-          }),
-          defaultModel: provider.model,
-          source: 'tenant_connector',
-        };
-      }
+    // See `AiTenantIdRequiredError`'s own doc comment. Every real caller has
+    // a tenant; an absent one here is a caller bug, not a legitimate
+    // platform-wide request, and must not silently resolve to the platform
+    // key.
+    if (!tenantId) {
+      throw new AiTenantIdRequiredError();
+    }
+
+    // See `AiTenantContextUnboundError`'s own doc comment: `resolveAiProvider`
+    // is RLS-scoped by the SESSION's bound tenant, not by this argument, so
+    // its answer is only trustworthy when the two agree. Checked before the
+    // query runs, not after — a `null` result is otherwise indistinguishable
+    // between "no connector" and "looked at the wrong tenant's rows".
+    const boundTenantId = TenantContext.getTenantId();
+    const bypassed = TenantContext.isBypassed();
+    if (bypassed || boundTenantId !== tenantId) {
+      throw new AiTenantContextUnboundError(tenantId, boundTenantId, bypassed);
+    }
+
+    const provider = await this.connectors.resolveAiProvider(tenantId);
+    if (provider?.apiKey || provider?.baseUrl) {
+      // Logged, not just returned: `source` is the one piece of evidence a
+      // residency-scoped tenant has that its documents went to its own
+      // endpoint and not the platform's. Never logs the key itself.
+      this.logger.log(
+        `AI client for tenant ${tenantId}: tenant_connector` +
+          (provider.baseUrl ? ` (${provider.baseUrl})` : ' (OpenAI)'),
+      );
+      return {
+        client: new OpenAI({
+          // An OpenAI-compatible endpoint may legitimately need no key (a
+          // self-hosted vLLM on a private network). The SDK still requires a
+          // non-empty string, so send a placeholder rather than refusing a
+          // valid configuration.
+          apiKey: provider.apiKey ?? 'not-required',
+          baseURL: provider.baseUrl ?? undefined,
+          maxRetries: 3,
+          timeout: 30000,
+        }),
+        defaultModel: provider.model,
+        source: 'tenant_connector',
+      };
     }
 
     if (!this.openaiClient) {
@@ -569,6 +733,7 @@ export class AiService {
       );
     }
 
+    this.logger.log(`AI client for tenant ${tenantId}: platform (OPENAI_API_KEY)`);
     return {
       client: this.openaiClient,
       defaultModel: null,
@@ -617,6 +782,7 @@ export class AiService {
         cached: false,
         sources,
         citationEnforced: false, // CitationEnforcementInterceptor sets this
+        provenance: { source },
       };
     } catch (error: unknown) {
       this.logger.error(`OpenAI execution failed: ${errorMessage(error)}`);

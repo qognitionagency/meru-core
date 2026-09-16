@@ -210,6 +210,13 @@ export class DocumentHubService {
             fileType: document.fileType,
             metadata: document.metadata,
           }),
+          // Top-level, not just `context.tenantId`: `AiService.execute` reads
+          // `request.tenantId` for `clientFor` routing (residency), not
+          // `request.context.tenantId` — that field only ever reached
+          // `{{TENANT_ID}}` prompt templating. Without it this call always
+          // resolved `clientFor(undefined)`, silently skipping this tenant's
+          // connector and going straight to the platform key.
+          tenantId: document.tenantId,
           context: { tenantId: document.tenantId },
         });
         aiSummary = aiAnalysis.result;
@@ -311,6 +318,9 @@ export class DocumentHubService {
           fileType: document.fileType,
           metadata: document.metadata,
         }),
+        // See `indexDocumentForSearch`'s comment above — top-level `tenantId`
+        // is what `clientFor` actually routes on.
+        tenantId: document.tenantId,
         context: { tenantId: document.tenantId },
       });
 
@@ -367,6 +377,9 @@ export class DocumentHubService {
           fileType: document.fileType,
           schema: extractionSchema,
         }),
+        // See `indexDocumentForSearch`'s comment above — top-level `tenantId`
+        // is what `clientFor` actually routes on.
+        tenantId: document.tenantId,
         context: { tenantId: document.tenantId },
       });
 

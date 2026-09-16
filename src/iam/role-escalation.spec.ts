@@ -73,6 +73,7 @@ describe('IamService — role-escalation guard', () => {
       authTokenRepo as any,
       {} as any,
       mailService as any,
+      { logEvent: jest.fn(async () => ({})) } as any,
     );
 
     return { service, userRepo, users };

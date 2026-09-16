@@ -59,6 +59,7 @@ describe('IamService — practitioner credential (FR-1.2)', () => {
       authTokenRepo as any,
       {} as any,
       mailService as any,
+      { logEvent: jest.fn(async () => ({})) } as any,
     );
 
     return { service, users, userRepo };

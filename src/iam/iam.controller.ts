@@ -224,7 +224,7 @@ export class IamController {
   @ApiResponse({ status: 200, description: 'Session revoked' })
   @ApiResponse({ status: 404, description: 'Not yours, or already revoked' })
   async revokeSession(@Request() req, @Param('id', ParseUUIDPipe) id: string) {
-    return this.iamService.revokeSessionById(req.user.id, id);
+    return this.iamService.revokeSessionById(req.user.tenantId, req.user.id, id);
   }
 
   @Post('logout-all')
@@ -240,7 +240,7 @@ export class IamController {
   })
   @ApiResponse({ status: 200, description: 'All sessions revoked' })
   async logoutAll(@Request() req) {
-    return this.iamService.revokeAllSessions(req.user.id);
+    return this.iamService.revokeAllSessions(req.user.tenantId, req.user.id);
   }
 
   // ── Multi-factor authentication ───────────────────────────────────────────

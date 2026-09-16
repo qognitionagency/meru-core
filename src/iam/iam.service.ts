@@ -33,6 +33,8 @@ import {
 import type { Actor } from '../common/access';
 import { MailService, inviteUrlFor } from '../core/mail/mail.service';
 import { resolveMailBrand } from '../core/mail/mail-brand';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction, AuditSeverity } from '../audit/entities/audit-log.entity';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 // otplib is pinned to v12 deliberately. v13 pulls in @scure/base and
@@ -110,7 +112,44 @@ export class IamService {
     private authTokenRepo: Repository<AuthToken>,
     private jwtService: JwtService,
     private mailService: MailService,
+    private auditService: AuditService,
   ) {}
+
+  /**
+   * Best-effort audit write for five of the seven IAM events that produced no
+   * `audit_logs` row at all before this pass: invite issue, invite resend,
+   * password-reset request, credential-token redemption, session revocation.
+   *
+   * Logged and swallowed, not rethrown: the primary action (the invite sent,
+   * the password changed) has already succeeded by the time this runs, and
+   * turning a working request into a 500 because the audit table had a
+   * transient failure would be strictly worse than an under-audited one.
+   * This is the same posture `TenantProvisioningService` already uses for its
+   * own post-commit audit write (`tenant-provisioning.service.ts`).
+   *
+   * **Role change and status change are the other two, and they do NOT use
+   * this helper.** They are privilege and account-standing changes, audited
+   * BEFORE the save and never swallowed — `updateUser`'s own comment at its
+   * two `auditService.logEvent` calls explains why: `TenancyService.runAsGod`'s
+   * write-before-and-rethrow discipline (CLAUDE.md §5.4), not this one.
+   */
+  private async audit(
+    entry: Omit<Parameters<AuditService['logEvent']>[0], 'severity'> & {
+      severity?: AuditSeverity;
+    },
+  ): Promise<void> {
+    try {
+      await this.auditService.logEvent({
+        severity: AuditSeverity.INFO,
+        ...entry,
+      });
+    } catch (err: unknown) {
+      this.logger.error(
+        `Failed to write audit entry (${entry.action} on ${entry.entityType} ${entry.entityId}): ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
 
   // ─── Authentication ──────────────────────────────────────────────
 
@@ -861,6 +900,24 @@ export class IamService {
       `Invited ${dto.email} to tenant ${tenantId} (email delivered: ${delivered})`,
     );
 
+    // Never the token: the token itself is stored SHA-256-only (see
+    // `issueAuthToken`) and must not exist anywhere else, logs included.
+    await this.audit({
+      tenantId,
+      userId: invitedBy?.id ?? user.id,
+      // `invitedBy.name` carries the caller's EMAIL, not a display name — see
+      // `UsersController.invite`'s call site (`{ id: req.user.id, name:
+      // req.user.email }`), kept because `MailService.sendInvite` wants an
+      // "inviterName" for the mail body and that is what the controller had.
+      userEmail: invitedBy?.name,
+      action: AuditAction.INVITE_ISSUED,
+      entityType: 'user',
+      entityId: user.id,
+      description: `Invited ${user.email} as '${requestedRole}'`,
+      afterState: { email: user.email, role: requestedRole, status: user.status },
+      context: { inviteSent: delivered },
+    });
+
     // `inviteUrl` travels with the result for the same reason `resendInvite`
     // returns it: when mail fails there is otherwise NO way to complete
     // onboarding — the token is stored SHA-256-only, so it cannot be recovered
@@ -950,6 +1007,20 @@ export class IamService {
     });
 
     this.logger.log(`Re-invited ${user.email} (email delivered: ${delivered})`);
+
+    // Issuing a fresh token also revokes the previous one (see this method's
+    // own doc comment) — worth a row in its own right if a resend is ever
+    // used to recover from a link sent to the wrong address.
+    await this.audit({
+      tenantId,
+      userId: invitedBy?.id ?? user.id,
+      userEmail: invitedBy?.name,
+      action: AuditAction.INVITE_RESENT,
+      entityType: 'user',
+      entityId: user.id,
+      description: `Re-invited ${user.email}`,
+      context: { inviteSent: delivered },
+    });
 
     return {
       email: user.email,
@@ -1065,6 +1136,12 @@ export class IamService {
       );
     }
 
+    // Captured before mutation — role/status are privilege and account-standing
+    // fields (this method's own doc comment), and a compliance review needs
+    // to see exactly what changed, not just that `updateUser` ran.
+    const previousRole = this.resolvePrimaryRole(user.roles ?? []);
+    const previousStatus = user.status;
+
     if (updates.firstName !== undefined) user.firstName = updates.firstName;
     if (updates.lastName !== undefined) user.lastName = updates.lastName;
     if (updates.status !== undefined) user.status = updates.status;
@@ -1089,7 +1166,64 @@ export class IamService {
       user.practitionerCredentialType = credential.type;
     }
 
+    // ROLE_CHANGED / STATUS_CHANGED are NOT best-effort, unlike the other
+    // five IAM audit events (`this.audit`, above). They are privilege and
+    // account-standing changes — this method's own doc comment — and a
+    // `firm_admin` silently promoting a colleague to `platform_admin` with no
+    // recoverable trace is worse than refusing the promotion outright.
+    //
+    // Written BEFORE `userRepo.save`, and never swallowed: if the
+    // hash-chained row cannot be written, the change must not take effect
+    // either. This is `TenancyService.runAsGod`'s own discipline (audit
+    // first, rethrow on failure), chosen deliberately over a single SQL
+    // transaction spanning both writes — `AuditService.logEvent` uses its own
+    // injected `Repository<AuditLog>` and accepts no external
+    // `EntityManager`/`QueryRunner`, so making it participate in a caller's
+    // transaction would mean widening that contract for every other module
+    // that calls it (billing, CRM, workflow, documents…), not just this one
+    // call site. Audit-before-and-rethrow gets the same real guarantee — a
+    // failed audit write leaves nothing persisted, because nothing has been
+    // saved yet — without that broader change.
+    //
+    // A consequence worth stating plainly: if this request ALSO changed
+    // `firstName`/`department`/the practitioner credential in the same call,
+    // those are mutated on `user` in memory above but not yet saved either,
+    // so a failed role/status audit refuses the whole update, not just the
+    // privilege change. That is the correct "all or nothing" shape for a
+    // request that touches a privilege field — there is no partial-success
+    // response that would be honest here.
+    if (updates.role !== undefined && updates.role !== previousRole) {
+      await this.auditService.logEvent({
+        tenantId,
+        userId: actor.id,
+        userEmail: actor.email,
+        action: AuditAction.ROLE_CHANGED,
+        entityType: 'user',
+        entityId: user.id,
+        description: `Role changed for ${user.email}: ${previousRole} → ${updates.role}`,
+        severity: AuditSeverity.INFO,
+        beforeState: { role: previousRole },
+        afterState: { role: updates.role },
+      });
+    }
+
+    if (updates.status !== undefined && updates.status !== previousStatus) {
+      await this.auditService.logEvent({
+        tenantId,
+        userId: actor.id,
+        userEmail: actor.email,
+        action: AuditAction.STATUS_CHANGED,
+        entityType: 'user',
+        entityId: user.id,
+        description: `Status changed for ${user.email}: ${previousStatus} → ${updates.status}`,
+        severity: AuditSeverity.INFO,
+        beforeState: { status: previousStatus },
+        afterState: { status: updates.status },
+      });
+    }
+
     await this.userRepo.save(user);
+
     return this.toDirectoryUser(user);
   }
 
@@ -1230,8 +1364,24 @@ export class IamService {
 
     if (user.status === UserStatus.LOCKED) {
       // A locked account must not be recoverable by self-service; that is the
-      // point of locking it.
+      // point of locking it. Audited at WARNING — an attempt against a locked
+      // account is exactly the kind of event a security review wants to find.
       this.logger.warn(`Password reset refused for locked account ${email}`);
+      await TenantContext.runAsSystem(
+        'audit refused password-reset request on locked account',
+        () =>
+          this.audit({
+            tenantId: user.tenantId,
+            userId: user.id,
+            userEmail: user.email,
+            action: AuditAction.PASSWORD_RESET_REQUESTED,
+            entityType: 'user',
+            entityId: user.id,
+            description: `Password reset requested for ${user.email} — refused, account locked`,
+            severity: AuditSeverity.WARNING,
+            context: { refused: true, reason: 'account_locked' },
+          }),
+      );
       return { ok: true };
     }
 
@@ -1265,6 +1415,21 @@ export class IamService {
       token,
       expiresAt,
     });
+
+    // Never the token — stored SHA-256-only, same discipline as the invite
+    // flow. This route is public and unauthenticated, so the "actor" and the
+    // audited subject are the same person: whoever holds this email address.
+    await TenantContext.runAsSystem('audit password-reset request', () =>
+      this.audit({
+        tenantId: user.tenantId,
+        userId: user.id,
+        userEmail: user.email,
+        action: AuditAction.PASSWORD_RESET_REQUESTED,
+        entityType: 'user',
+        entityId: user.id,
+        description: `Password reset requested for ${user.email}`,
+      }),
+    );
 
     return { ok: true };
   }
@@ -1330,6 +1495,23 @@ export class IamService {
       );
 
       this.logger.log(`Password set for ${user.email} via ${record.type}`);
+
+      // The whole point of this event: someone set a credential using a
+      // bearer token, with no session and no logged-in actor to attribute it
+      // to otherwise. `context.tokenType` distinguishes an invite acceptance
+      // from a reset completion — one handler serves both (see this method's
+      // own doc comment) — and `sessionsRevoked` records the side effect this
+      // redemption already had. Never the token itself.
+      await this.audit({
+        tenantId: user.tenantId,
+        userId: user.id,
+        userEmail: user.email,
+        action: AuditAction.TOKEN_REDEEMED,
+        entityType: 'user',
+        entityId: user.id,
+        description: `Credential set for ${user.email} via ${record.type} token`,
+        context: { tokenType: record.type, allSessionsRevoked: true },
+      });
 
       return { ok: true as const, email: user.email };
     });
@@ -1483,7 +1665,7 @@ export class IamService {
    * which the list endpoint hands out freely — would be enough to sign any
    * other user out.
    */
-  async revokeSessionById(userId: string, sessionId: string) {
+  async revokeSessionById(tenantId: string, userId: string, sessionId: string) {
     const result = await this.sessionRepo.update(
       { id: sessionId, userId, revokedAt: IsNull() },
       { revokedAt: new Date() },
@@ -1493,6 +1675,16 @@ export class IamService {
       throw new NotFoundException('Session not found or already revoked');
     }
 
+    await this.audit({
+      tenantId,
+      userId,
+      action: AuditAction.SESSION_REVOKED,
+      entityType: 'session',
+      entityId: sessionId,
+      description: 'Session revoked by its own holder',
+      context: { scope: 'single' },
+    });
+
     return { revoked: true, sessionId };
   }
 
@@ -1501,11 +1693,21 @@ export class IamService {
    * device. This is the "sign me out everywhere" button, and the right response
    * to a suspected compromise.
    */
-  async revokeAllSessions(userId: string) {
+  async revokeAllSessions(tenantId: string, userId: string) {
     const result = await this.sessionRepo.update(
       { userId, revokedAt: IsNull() },
       { revokedAt: new Date() },
     );
+
+    await this.audit({
+      tenantId,
+      userId,
+      action: AuditAction.SESSION_REVOKED,
+      entityType: 'user',
+      entityId: userId,
+      description: `All sessions revoked (${result.affected ?? 0})`,
+      context: { scope: 'all', sessionCount: result.affected ?? 0 },
+    });
 
     return { revoked: true, sessionCount: result.affected ?? 0 };
   }

@@ -45,6 +45,7 @@ import { AddRecordNumbering1756900000000 } from '../migrations/1756900000000-Add
 import { BackfillRecordNumbers1756910000000 } from '../migrations/1756910000000-BackfillRecordNumbers';
 import { AddLeadIntake1757000000000 } from '../migrations/1757000000000-AddLeadIntake';
 import { AddUserPractitionerCredential1756920000000 } from '../migrations/1756920000000-AddUserPractitionerCredential';
+import { AddIamAuditActions1757100000000 } from '../migrations/1757100000000-AddIamAuditActions';
 import { AddJobRunScope1757200000000 } from '../migrations/1757200000000-AddJobRunScope';
 
 /**
@@ -123,6 +124,11 @@ export const ALL_MIGRATIONS = [
   // array: "migration on disk, missing from ALL_MIGRATIONS" has been a real
   // production bug four times in this repo.
   AddLeadIntake1757000000000,
+  // IAM audit coverage: invite issue/resend, password-reset request, token
+  // redemption, session revocation, role change, status change. Registered
+  // in the same commit as the migration file — see the comment at the top of
+  // this array.
+  AddIamAuditActions1757100000000,
   // ADR 0018 — scope evidence on job_runs, so a sweep blocked by an unbound
   // TenantContext stops reading as "ok" with zero rows scanned. Registered in
   // the same commit as the migration file, per this array's own standing

@@ -19,6 +19,19 @@ export enum AuditAction {
   APPROVE = 'approve',
   REJECT = 'reject',
   WORKFLOW_TRANSITION = 'workflow_transition',
+  // IAM coverage (migration 1757100000000-AddIamAuditActions). Distinct from
+  // CREATE/UPDATE so a compliance query can filter on the event itself rather
+  // than reading entityType/description on every row — see that migration's
+  // comment for why.
+  INVITE_ISSUED = 'invite_issued',
+  INVITE_RESENT = 'invite_resent',
+  PASSWORD_RESET_REQUESTED = 'password_reset_requested',
+  /** Covers both an invite acceptance and a reset completion — one handler,
+   *  `IamService.resetPassword`, serves both; `context.tokenType` says which. */
+  TOKEN_REDEEMED = 'token_redeemed',
+  SESSION_REVOKED = 'session_revoked',
+  ROLE_CHANGED = 'role_changed',
+  STATUS_CHANGED = 'status_changed',
 }
 
 export enum AuditSeverity {

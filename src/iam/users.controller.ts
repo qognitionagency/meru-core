@@ -188,6 +188,7 @@ export class UsersController {
     return this.iamService.updateUser(req.user.tenantId, id, dto, {
       id: req.user.id,
       roles: req.user.roles,
+      email: req.user.email,
     });
   }
 

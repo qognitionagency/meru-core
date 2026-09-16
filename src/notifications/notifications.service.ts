@@ -20,6 +20,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import type { PackMessageTemplate } from '../../packages/config-packs/_schema/pack.schema';
+import { runTenantBoundSweep } from '../core/tenancy/tenant-bound-sweep';
+import { JobScopeEvidence } from '../jobs/job-catalogue';
 
 /**
  * Whether a value can be handed to a `uuid` column.
@@ -540,45 +542,81 @@ export class NotificationsService {
   // ==================== SCHEDULED JOBS ====================
 
   @Cron(CronExpression.EVERY_MINUTE)
-  async processScheduledNotifications(): Promise<void> {
-    const now = new Date();
-
-    const scheduled = await this.notificationRepo.find({
-      where: {
-        status: NotificationStatus.PENDING,
-        scheduledAt: LessThan(now),
+  async processScheduledNotifications(): Promise<{
+    found: number;
+    emitted: number;
+    scope: JobScopeEvidence;
+  }> {
+    // ADR 0018 — same defect as every other job here: outside a request,
+    // `TenantContext.get()` is undefined and the RLS-bound connection
+    // matched zero rows on every tenant's `notifications` table. §1.3 of the
+    // ADR flags this handler as possibly dead code (nothing in this repo
+    // listens for `notification.created`) — fixed as if live regardless,
+    // since retiring the job is a separate, product-owner decision.
+    const sweep = await runTenantBoundSweep<Notification>(
+      'scheduled notifications',
+      () =>
+        this.notificationRepo.find({
+          where: {
+            status: NotificationStatus.PENDING,
+            scheduledAt: LessThan(new Date()),
+          },
+        }),
+      async (notification) => {
+        this.eventEmitter.emit('notification.created', notification);
       },
-    });
+    );
 
-    for (const notification of scheduled) {
-      this.eventEmitter.emit('notification.created', notification);
-    }
+    return {
+      found: sweep.itemsFound,
+      emitted: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
+      },
+    };
   }
 
   @Cron(CronExpression.EVERY_DAY_AT_9AM)
-  async sendDigestEmails(): Promise<void> {
-    // Get users with digest enabled
-    const users = await this.preferenceRepo.find();
+  async sendDigestEmails(): Promise<{
+    usersScanned: number;
+    processed: number;
+    scope: JobScopeEvidence;
+  }> {
+    const sweep = await runTenantBoundSweep<NotificationPreference>(
+      'digest emails',
+      () => this.preferenceRepo.find(),
+      async (user) => {
+        if (!user.digestSettings?.enabled) return;
 
-    for (const user of users) {
-      if (!user.digestSettings?.enabled) continue;
-
-      const unread = await this.getNotifications(user.tenantId, user.userId, {
-        isRead: false,
-      });
-
-      if (unread.notifications.length > 0) {
-        // Send digest email
-        await this.sendNotification({
-          tenantId: user.tenantId,
-          type: NotificationType.EMAIL,
-          recipientId: user.userId,
-          subject: `You have ${unread.total} unread notifications`,
-          content: `You have ${unread.total} unread notifications. Log in to view them.`,
-          category: NotificationCategory.SYSTEM,
+        const unread = await this.getNotifications(user.tenantId, user.userId, {
+          isRead: false,
         });
-      }
-    }
+
+        if (unread.notifications.length > 0) {
+          // Send digest email
+          await this.sendNotification({
+            tenantId: user.tenantId,
+            type: NotificationType.EMAIL,
+            recipientId: user.userId,
+            subject: `You have ${unread.total} unread notifications`,
+            content: `You have ${unread.total} unread notifications. Log in to view them.`,
+            category: NotificationCategory.SYSTEM,
+          });
+        }
+      },
+    );
+
+    return {
+      usersScanned: sweep.itemsFound,
+      processed: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
+      },
+    };
   }
 
   // ==================== PRIVATE HELPERS ====================

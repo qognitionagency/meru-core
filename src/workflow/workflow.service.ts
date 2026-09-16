@@ -9,8 +9,13 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
-import { Actor, hasTenantWideReach } from '../common/access';
+import { Actor, hasTenantWideReach, SYSTEM_ACTOR } from '../common/access';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
+import { AuditService } from '../audit/audit.service';
+import {
+  AuditAction,
+  AuditSeverity,
+} from '../audit/entities/audit-log.entity';
 import * as https from 'https';
 import * as http from 'http';
 import * as crypto from 'crypto';
@@ -61,6 +66,15 @@ export interface TransitionRequest {
    * be satisfied, because there is nothing to match against.
    */
   userRoles?: string[];
+  /**
+   * Set when this transition was triggered by a scheduled job, not a human
+   * request. `by` names the job/service (e.g. 'sla-watchdog:auto_approve'),
+   * not a person. When set, `userId`/`userRoles` should still be a real
+   * Actor (SYSTEM_ACTOR, `common/access.ts`) for the permission check —
+   * `automated` only changes how the outcome is attributed in `history[]`,
+   * not who the permission gate evaluates against. ADR 0018 §4.
+   */
+  automated?: { by: string; reason?: string };
   context?: Record<string, any>;
 }
 
@@ -114,6 +128,7 @@ export class WorkflowEngineService {
     @Inject(forwardRef(() => FeeScheduleService))
     private feeScheduleService: FeeScheduleService,
     private readonly rules: RuleEvaluatorService,
+    private readonly auditService: AuditService,
   ) {}
 
   // ==================== WORKFLOW DEFINITION ====================
@@ -545,6 +560,47 @@ export class WorkflowEngineService {
       );
     }
 
+    // ADR 0018 §4, Anton's secops review — an automated transition has no
+    // human decision-maker behind it, so the audit trail is the only record
+    // of why the case moved. Written and confirmed BEFORE the state change
+    // executes (nothing below has opened a transaction yet), the same
+    // fail-closed discipline `TenancyService.runAsGod` uses for god-mode
+    // access (tenancy.service.ts:44-72): if this write fails, the exception
+    // propagates and the transition does not happen either. An unlogged
+    // automated approval is exactly what that discipline forbids for a
+    // human-triggered cross-tenant read; the same reasoning applies to a
+    // machine-triggered state change no human reviewed.
+    if (request.automated) {
+      await this.auditService
+        .logEvent({
+          tenantId: instance.tenantId,
+          userId: request.userId,
+          action: AuditAction.WORKFLOW_TRANSITION,
+          entityType: 'workflow_instance',
+          entityId: instance.id,
+          description:
+            `Automated transition (${request.automated.by}) from ` +
+            `'${instance.currentState.name}' to '${transition.toState.name}'` +
+            (request.automated.reason ? `: ${request.automated.reason}` : ''),
+          // The enum has no literal HIGH; CRITICAL is the closest available
+          // severity and matches the convention `TenancyService.runAsGod`
+          // already uses for an action nobody with a human login reviewed.
+          severity: AuditSeverity.CRITICAL,
+          context: {
+            automated: request.automated,
+            transitionId: transition.id,
+          },
+        })
+        .catch((error) => {
+          this.logger.error(
+            `Failed to write audit entry for automated transition on ` +
+              `instance ${instance.id}: ` +
+              (error instanceof Error ? error.message : String(error)),
+          );
+          throw error;
+        });
+    }
+
     // Execute transition
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -560,13 +616,19 @@ export class WorkflowEngineService {
         ...request.context,
       };
 
-      // Add to history
+      // Add to history. `automated`/`automatedBy` are only present at all
+      // when this was a scheduled-job transition — genuinely absent, not
+      // `false`/`undefined`, so a pre-ADR-0018 history entry and an ordinary
+      // human transition after it stay indistinguishable (ADR 0018 §4.2).
       instance.history.push({
         timestamp: new Date(),
         fromState: oldState.name,
         toState: newState.name,
         transitionId: transition.id,
-        triggeredBy: request.userId,
+        triggeredBy: request.automated ? SYSTEM_ACTOR.id : request.userId,
+        ...(request.automated
+          ? { automated: true, automatedBy: request.automated.by }
+          : {}),
         context: newContext,
       });
 
@@ -612,71 +674,18 @@ export class WorkflowEngineService {
     }
   }
 
-  // ==================== SLA MONITORING ====================
-
-  async checkSLAViolations(): Promise<void> {
-    const now = new Date();
-    const violations = await this.instanceRepo.find({
-      where: {
-        status: InstanceStatus.ACTIVE,
-        slaDeadline: now,
-      },
-      relations: ['workflow', 'currentState'],
-    });
-
-    for (const instance of violations) {
-      const escalationLevel = instance.escalationLevel + 1;
-      const escalation = instance.workflow.slaConfig?.escalationLevels?.find(
-        (e) => e.level === escalationLevel,
-      );
-
-      if (escalation) {
-        // Execute escalation action
-        this.logger.warn(
-          `SLA violation for instance ${instance.id}: Level ${escalationLevel}`,
-        );
-
-        instance.slaViolations.push({
-          level: escalationLevel,
-          timestamp: new Date(),
-          action: escalation.action,
-        });
-
-        // Update escalation level
-        await this.instanceRepo.update(instance.id, {
-          escalationLevel,
-          slaViolations: instance.slaViolations,
-        });
-
-        // Notify the escalation.notify list
-        if (escalation.notify?.length) {
-          for (const recipientId of escalation.notify as string[]) {
-            await this.notificationsService
-              .sendNotification({
-                tenantId: instance.tenantId,
-                type: NotificationType.IN_APP,
-                recipientId,
-                subject: `SLA Escalation Level ${escalationLevel}`,
-                content: `Workflow instance ${instance.id} has breached its SLA and has been escalated to level ${escalationLevel}.`,
-                category: NotificationCategory.WORKFLOW,
-                metadata: {
-                  workflowInstanceId: instance.id,
-                  escalationLevel,
-                  action: escalation.action,
-                },
-              })
-              .catch((e) =>
-                this.logger.error(
-                  `SLA notification failed for ${recipientId}: ${e}`,
-                ),
-              );
-          }
-        }
-      }
-    }
-  }
-
   // ==================== PRIVATE HELPERS ====================
+  //
+  // ADR 0018 §2c point 5 (Anton's secops review) — `checkSLAViolations()`
+  // used to stand here: a second, dead implementation of the same sweep
+  // `SlaWatchdogService.checkSLAViolations` (services/sla-watchdog.service.ts)
+  // actually runs. Confirmed zero callers before deletion —
+  // `grep -rn checkSLAViolations src` finds only this file's own (now
+  // deleted) definition and `SlaWatchdogService`'s; every dispatcher
+  // (`agent-registry.service.ts`, `job-dispatch.service.ts`) and their specs
+  // call the latter. It queried `slaDeadline: now` — an exact-equality match
+  // against the current timestamp, which cannot ever match a row — so beyond
+  // being unreachable, it could not have found a violation even if called.
 
   private evaluateConditions(
     conditions: {

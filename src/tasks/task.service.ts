@@ -26,6 +26,8 @@ import { AiService } from '../ai/ai.service';
 import { DocumentHubService } from '../documents/document-hub.service';
 import { Document } from '../documents/entities/document.entity';
 import { Actor, hasTenantWideReach } from '../common/access';
+import { runTenantBoundSweep } from '../core/tenancy/tenant-bound-sweep';
+import { JobScopeEvidence } from '../jobs/job-catalogue';
 
 export interface CreateTaskDto {
   title: string;
@@ -457,73 +459,104 @@ export class TaskService {
   // ==================== SCHEDULED JOBS ====================
 
   @Cron(CronExpression.EVERY_MINUTE)
-  async processRecurringJobs() {
-    const now = new Date();
+  async processRecurringJobs(): Promise<{
+    jobsFound: number;
+    executed: number;
+    scope: JobScopeEvidence;
+  }> {
+    // ADR 0018 — this used to run outside any tenant context, so the
+    // RLS-bound connection matched zero rows on every tenant's
+    // `recurring_jobs` and "Processing 0 recurring jobs" logged forever with
+    // no error to read. `runTenantBoundSweep` enumerates cross-tenant under
+    // system context, then binds each job to its own tenant for the full
+    // duration of `executeRecurringJob` — reads and writes both.
+    const sweep = await runTenantBoundSweep<RecurringJob>(
+      'recurring tasks',
+      () =>
+        this.recurringJobRepo.find({
+          where: {
+            status: RecurringJobStatus.ACTIVE,
+            nextRunAt: LessThan(new Date()),
+          },
+        }),
+      (job) => this.executeRecurringJob(job),
+    );
 
-    const jobs = await this.recurringJobRepo.find({
-      where: {
-        status: RecurringJobStatus.ACTIVE,
-        nextRunAt: LessThan(now),
+    this.logger.log(
+      `Processed ${sweep.itemsProcessed}/${sweep.itemsFound} recurring jobs ` +
+        `(${sweep.failures.length} failed)`,
+    );
+
+    return {
+      jobsFound: sweep.itemsFound,
+      executed: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
       },
-    });
-
-    this.logger.log(`Processing ${jobs.length} recurring jobs`);
-
-    for (const job of jobs) {
-      try {
-        await this.executeRecurringJob(job);
-      } catch (error) {
-        this.logger.error(`Failed to execute job ${job.id}:`, error);
-
-        job.runHistory.push({
-          timestamp: new Date(),
-          status: 'error',
-          error: error.message,
-        });
-
-        if (job.config.retryOnError) {
-          job.status = RecurringJobStatus.ERROR;
-        }
-
-        await this.recurringJobRepo.save(job);
-      }
-    }
+    };
   }
 
   private async executeRecurringJob(job: RecurringJob): Promise<void> {
-    // Check if max runs reached
-    if (job.config.maxRuns && job.runCount >= job.config.maxRuns) {
-      job.status = RecurringJobStatus.COMPLETED;
+    try {
+      // Check if max runs reached
+      if (job.config.maxRuns && job.runCount >= job.config.maxRuns) {
+        job.status = RecurringJobStatus.COMPLETED;
+        await this.recurringJobRepo.save(job);
+        return;
+      }
+
+      // Create task from template
+      const task = await this.createTask(job.tenantId, {
+        title: job.taskTemplate.title,
+        description: job.taskTemplate.description,
+        type: job.taskTemplate.type as TaskType,
+        priority: job.taskTemplate.priority as TaskPriority,
+        assignedTo: job.taskTemplate.assignedTo,
+        assignedBy: 'system', // Recurring jobs are created by system
+        config: job.taskTemplate.config,
+      });
+
+      // Update job
+      job.runCount++;
+      job.lastRunAt = new Date();
+      job.nextRunAt = this.calculateNextRun(job.schedule);
+      job.runHistory.push({
+        timestamp: new Date(),
+        status: 'success',
+        taskId: task.id,
+      });
+
       await this.recurringJobRepo.save(job);
-      return;
+
+      this.logger.log(
+        `Recurring job ${job.id} executed, task ${task.id} created`,
+      );
+    } catch (error) {
+      // Preserved from the pre-ADR-0018 loop in `processRecurringJobs` —
+      // this bookkeeping is unrelated to tenancy and does not move, it only
+      // moves one level down so it still runs inside the per-item tenant
+      // binding `runTenantBoundSweep` now provides. Rethrown so the sweep's
+      // own per-item failure tracking (`SweepScope.failures`, surfaced at
+      // `job_runs.scope`) also sees it: this keeps `RecurringJob.runHistory`
+      // readable from the job's own detail view, the sweep keeps the
+      // platform-wide health signal honest — complementary, not duplicative.
+      this.logger.error(`Failed to execute job ${job.id}:`, error);
+
+      job.runHistory.push({
+        timestamp: new Date(),
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      if (job.config.retryOnError) {
+        job.status = RecurringJobStatus.ERROR;
+      }
+
+      await this.recurringJobRepo.save(job);
+      throw error;
     }
-
-    // Create task from template
-    const task = await this.createTask(job.tenantId, {
-      title: job.taskTemplate.title,
-      description: job.taskTemplate.description,
-      type: job.taskTemplate.type as TaskType,
-      priority: job.taskTemplate.priority as TaskPriority,
-      assignedTo: job.taskTemplate.assignedTo,
-      assignedBy: 'system', // Recurring jobs are created by system
-      config: job.taskTemplate.config,
-    });
-
-    // Update job
-    job.runCount++;
-    job.lastRunAt = new Date();
-    job.nextRunAt = this.calculateNextRun(job.schedule);
-    job.runHistory.push({
-      timestamp: new Date(),
-      status: 'success',
-      taskId: task.id,
-    });
-
-    await this.recurringJobRepo.save(job);
-
-    this.logger.log(
-      `Recurring job ${job.id} executed, task ${task.id} created`,
-    );
   }
 
   private calculateNextRun(schedule: string, startDate?: Date): Date {

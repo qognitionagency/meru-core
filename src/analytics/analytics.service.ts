@@ -22,6 +22,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SearchService } from '../search/search.service';
 import { AiService } from '../ai/ai.service';
+import { runTenantBoundSweep } from '../core/tenancy/tenant-bound-sweep';
+import { JobScopeEvidence } from '../jobs/job-catalogue';
 
 export interface CreateReportDto {
   name: string;
@@ -456,88 +458,91 @@ export class AnalyticsService {
   // ==================== SCHEDULED REPORTS ====================
 
   @Cron(CronExpression.EVERY_HOUR)
-  async processScheduledReports(): Promise<void> {
+  async processScheduledReports(): Promise<{
+    reportsFound: number;
+    executed: number;
+    scope: JobScopeEvidence;
+  }> {
     this.logger.log('Processing scheduled reports...');
 
-    const now = new Date();
-    const currentHour = now.getHours();
-    const currentMinute = now.getMinutes();
-    const currentDay = now.getDay();
-    const currentDate = now.getDate();
+    // ADR 0018 — the schedule filter (hour/minute/frequency match) stays
+    // in-code, applied per report inside `fn`, unchanged: TypeORM cannot
+    // query deep JSONB with dot notation, so it never could move into the
+    // enumeration query. What moves is tenancy: enumeration now runs under
+    // system context (the one place this legitimately spans every tenant),
+    // and each report's export + event emission is now bound to its own
+    // tenant, closing the same "matched zero rows outside a request" defect
+    // every job in this ADR had.
+    const sweep = await runTenantBoundSweep<Report>(
+      'scheduled reports',
+      () => this.reportRepo.find({ where: { status: 'active' } }),
+      async (report) => {
+        const schedule = report.schedule;
+        if (!schedule?.enabled) return;
 
-    // Query all active reports and filter by schedule in code
-    // TypeORM doesn't support deep JSONB querying with dot notation in where clause
-    const allReports = await this.reportRepo.find({
-      where: {
-        status: 'active',
+        const now = new Date();
+        const [scheduleHour, scheduleMinute] = schedule.time
+          .split(':')
+          .map(Number);
+
+        if (
+          now.getHours() !== scheduleHour ||
+          now.getMinutes() !== scheduleMinute
+        ) {
+          return;
+        }
+
+        let shouldRun = false;
+        switch (schedule.frequency) {
+          case 'daily':
+            shouldRun = true;
+            break;
+          case 'weekly':
+            shouldRun = now.getDay() === schedule.dayOfWeek;
+            break;
+          case 'monthly':
+            shouldRun = now.getDate() === schedule.dayOfMonth;
+            break;
+        }
+
+        if (!shouldRun) return;
+
+        this.logger.log(`Executing scheduled report: ${report.id}`);
+
+        const format: 'csv' | 'xlsx' | 'pdf' = schedule.format ?? 'csv';
+        const exported = await this.exportReport(
+          report.tenantId,
+          report.id,
+          format,
+        );
+
+        // Emit event so any registered listener (e.g. COM module) can
+        // deliver the export to the schedule.recipients list.
+        this.eventEmitter.emit('analytics.report.ready', {
+          tenantId: report.tenantId,
+          reportId: report.id,
+          reportName: report.name,
+          format,
+          fileUrl: exported.fileUrl,
+          mimeType: exported.mimeType,
+          recipients: schedule.recipients ?? [],
+        });
+
+        this.logger.log(
+          `Scheduled report ${report.id} executed and emitted (format=${format})`,
+        );
       },
-    });
-
-    const reports = allReports.filter(
-      (report) => report.schedule?.enabled === true,
     );
 
-    for (const report of reports) {
-      const schedule = report.schedule;
-      if (!schedule?.enabled) continue;
-
-      // Check if it's time to run
-      const [scheduleHour, scheduleMinute] = schedule.time
-        .split(':')
-        .map(Number);
-
-      if (currentHour !== scheduleHour || currentMinute !== scheduleMinute) {
-        continue;
-      }
-
-      // Check frequency
-      let shouldRun = false;
-      switch (schedule.frequency) {
-        case 'daily':
-          shouldRun = true;
-          break;
-        case 'weekly':
-          shouldRun = currentDay === schedule.dayOfWeek;
-          break;
-        case 'monthly':
-          shouldRun = currentDate === schedule.dayOfMonth;
-          break;
-      }
-
-      if (shouldRun) {
-        try {
-          this.logger.log(`Executing scheduled report: ${report.id}`);
-
-          const format: 'csv' | 'xlsx' | 'pdf' = schedule.format ?? 'csv';
-          const exported = await this.exportReport(
-            report.tenantId,
-            report.id,
-            format,
-          );
-
-          // Emit event so any registered listener (e.g. COM module) can
-          // deliver the export to the schedule.recipients list.
-          this.eventEmitter.emit('analytics.report.ready', {
-            tenantId: report.tenantId,
-            reportId: report.id,
-            reportName: report.name,
-            format,
-            fileUrl: exported.fileUrl,
-            mimeType: exported.mimeType,
-            recipients: schedule.recipients ?? [],
-          });
-
-          this.logger.log(
-            `Scheduled report ${report.id} executed and emitted (format=${format})`,
-          );
-        } catch (error) {
-          this.logger.error(
-            `Failed to execute scheduled report ${report.id}:`,
-            error,
-          );
-        }
-      }
-    }
+    return {
+      reportsFound: sweep.itemsFound,
+      executed: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
+      },
+    };
   }
 
   // ==================== EXPORT ====================

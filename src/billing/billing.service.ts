@@ -23,6 +23,8 @@ import {
 import { Invoice, InvoiceStatus } from './entities/invoice.entity';
 import { InvoiceItem, InvoiceItemType } from './entities/invoice-item.entity';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { runTenantBoundSweep } from '../core/tenancy/tenant-bound-sweep';
+import { JobScopeEvidence } from '../jobs/job-catalogue';
 
 export interface CreateSubscriptionDto {
   entityId: string;
@@ -513,25 +515,40 @@ export class BillingService {
   }
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
-  async processDailyBilling(): Promise<void> {
+  async processDailyBilling(): Promise<{
+    subscriptionsFound: number;
+    invoiced: number;
+    scope: JobScopeEvidence;
+  }> {
     this.logger.log('Processing daily billing cycle...');
 
+    // ADR 0018 — this is the money-handling instance of the class of defect
+    // this ADR closes: outside a request the RLS-bound connection matched
+    // zero rows on every tenant's `subscriptions`, so no invoice was ever
+    // generated, silently, since the deploy that introduced serverless job
+    // dispatch. `runTenantBoundSweep` enumerates cross-tenant under system
+    // context, then binds each subscription to its own tenant for the full
+    // duration of `generateInvoice` + the period advance + save — reads and
+    // writes both, so the write is not silently filtered to zero rows one
+    // level down the way binding only the enumeration would reproduce (ADR
+    // §1.5).
     const now = new Date();
+    const periodStart = new Date(now);
+    periodStart.setHours(0, 0, 0, 0);
+    const periodEnd = new Date(now);
+    periodEnd.setHours(23, 59, 59, 999);
 
-    // Find subscriptions ending their period today
-    const subscriptions = await this.subscriptionRepo.find({
-      where: {
-        status: SubscriptionStatus.ACTIVE,
-        currentPeriodEnd: Between(
-          new Date(now.setHours(0, 0, 0, 0)),
-          new Date(now.setHours(23, 59, 59, 999)),
-        ),
-      },
-      relations: ['plan'],
-    });
-
-    for (const subscription of subscriptions) {
-      try {
+    const sweep = await runTenantBoundSweep<Subscription>(
+      'daily billing',
+      () =>
+        this.subscriptionRepo.find({
+          where: {
+            status: SubscriptionStatus.ACTIVE,
+            currentPeriodEnd: Between(periodStart, periodEnd),
+          },
+          relations: ['plan'],
+        }),
+      async (subscription) => {
         // Generate invoice for the period
         await this.generateInvoice(
           subscription.id,
@@ -551,13 +568,23 @@ export class BillingService {
         subscription.usage = this.initializeUsage(subscription.plan);
 
         await this.subscriptionRepo.save(subscription);
-      } catch (error) {
-        this.logger.error(
-          `Failed to process billing for subscription ${subscription.id}:`,
-          error,
-        );
-      }
-    }
+      },
+    );
+
+    this.logger.log(
+      `Billed ${sweep.itemsProcessed}/${sweep.itemsFound} subscriptions ` +
+        `(${sweep.failures.length} failed)`,
+    );
+
+    return {
+      subscriptionsFound: sweep.itemsFound,
+      invoiced: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
+      },
+    };
   }
 
   // ==================== PRIVATE HELPERS ====================

@@ -14,6 +14,8 @@ import {
 } from '../../notifications/entities/notification.entity';
 import { WorkflowEngineService } from '../workflow.service';
 import { SYSTEM_ACTOR } from '../../common/access';
+import { runTenantBoundSweep } from '../../core/tenancy/tenant-bound-sweep';
+import { JobScopeEvidence } from '../../jobs/job-catalogue';
 
 @Injectable()
 export class SlaWatchdogService {
@@ -93,25 +95,52 @@ export class SlaWatchdogService {
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
-  async checkSLAViolations() {
+  async checkSLAViolations(): Promise<{
+    violationsFound: number;
+    escalated: number;
+    scope: JobScopeEvidence;
+  }> {
     this.logger.log('Running SLA violation check...');
 
-    const now = new Date();
+    // ADR 0018 — this used to run outside any tenant context: a scheduled
+    // job has `TenantContext.get()` undefined, so the RLS-bound connection
+    // matched zero rows on every tenant's `workflow_instances`, and this
+    // logged "Found 0 SLA violations" forever with no error to read — the
+    // watchdog never actually escalated a breach. `runTenantBoundSweep`
+    // enumerates cross-tenant under system context (the one place this
+    // legitimately has to see every tenant), then binds each instance to its
+    // own tenant for the full duration of `processEscalation`, reads and
+    // writes both — including the write one level down inside
+    // `WorkflowEngineService.transition` (§1.5 of the ADR: binding only the
+    // enumeration and not the whole per-item unit of work reproduces the
+    // identical bug via a silently-no-op `UPDATE`).
+    const sweep = await runTenantBoundSweep<WorkflowInstance>(
+      'sla watchdog',
+      () =>
+        this.instanceRepo.find({
+          where: {
+            status: InstanceStatus.ACTIVE,
+            slaDeadline: LessThan(new Date()),
+          },
+          relations: ['workflow', 'currentState'],
+        }),
+      (instance) => this.processEscalation(instance),
+    );
 
-    // Find instances with expired SLA deadlines
-    const violations = await this.instanceRepo.find({
-      where: {
-        status: InstanceStatus.ACTIVE,
-        slaDeadline: LessThan(now),
+    this.logger.log(
+      `Found ${sweep.itemsFound} SLA violations, escalated ${sweep.itemsProcessed} ` +
+        `(${sweep.failures.length} failed)`,
+    );
+
+    return {
+      violationsFound: sweep.itemsFound,
+      escalated: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
       },
-      relations: ['workflow', 'currentState'],
-    });
-
-    this.logger.log(`Found ${violations.length} SLA violations`);
-
-    for (const instance of violations) {
-      await this.processEscalation(instance);
-    }
+    };
   }
 
   private async processEscalation(instance: WorkflowInstance): Promise<void> {
@@ -187,11 +216,27 @@ export class SlaWatchdogService {
           break;
         }
 
+        // ADR 0018 §4.1/§4.2 — this used to attribute the transition to
+        // `instance.startedBy`, the human who began the matter, not the
+        // watchdog that actually approved it: a compliance review of "who
+        // approved this matter's progression" read a human's name off a
+        // decision that human never made. `automated` records the truth in
+        // `history[].automated`/`automatedBy`, and passing `userRoles` fixes
+        // an adjacent silent gap — without it `checkPermissions` evaluated
+        // against an empty array and any pack transition declaring
+        // `permissions.roles` always 400'd here, invisible until
+        // `runTenantBoundSweep` stopped turning one instance's exception into
+        // an abort of the whole sweep.
         await this.workflowService.transition({
           instanceId: instance.id,
           tenantId: instance.tenantId,
           transitionId: moved.id,
-          userId: instance.startedBy,
+          userId: SYSTEM_ACTOR.id,
+          userRoles: SYSTEM_ACTOR.roles,
+          automated: {
+            by: 'sla-watchdog:auto_approve',
+            reason: 'SLA breach auto-approval',
+          },
           context: { autoApprovedBySlaBreach: true },
         });
         this.logger.log(

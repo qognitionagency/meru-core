@@ -3,6 +3,8 @@ import { QueueService } from './queue.service';
 import { QueueJob } from './entities/job.entity';
 import { JobType, JobResult, JobStatus } from './interfaces/job.interface';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { TenantContext } from '../core/tenancy/tenant-context';
+import { JobScopeEvidence } from '../jobs/job-catalogue';
 
 @Injectable()
 export class JobProcessor implements OnModuleInit {
@@ -33,22 +35,50 @@ export class JobProcessor implements OnModuleInit {
    * Bounded on both counts and wall clock so it always returns well inside the
    * function's maxDuration, leaving any remainder for the next invocation.
    */
-  async drainQueue(maxJobs = 25, budgetMs = 30_000): Promise<number> {
+  async drainQueue(
+    maxJobs = 25,
+    budgetMs = 30_000,
+  ): Promise<{ drained: number; scope: JobScopeEvidence }> {
     const deadline = Date.now() + budgetMs;
     let processed = 0;
 
     while (processed < maxJobs && Date.now() < deadline) {
-      const job = await this.queueService.getNextJob(Object.values(JobType));
+      // ADR 0018 §2.3 — queue-drain is a documented exception to
+      // `runTenantBoundSweep`: `getNextJob`'s `FOR UPDATE SKIP LOCKED` claim
+      // is inherently cross-tenant by priority ordering (globally next job
+      // by priority, then createdAt), which cannot be reproduced by
+      // enumerating tenants one at a time without inventing a round-robin
+      // that discards the platform-wide priority the queue exists to
+      // provide. So the claim itself runs under system context, and —
+      // separately — each claimed job's *entire* processing (both the
+      // success and the failure path inside `processJobInternal`) is bound
+      // to its own tenant, so `completeJob`/`failJob`'s writes are not
+      // silently filtered to zero rows by RLS the way binding only the
+      // claim would reproduce (ADR §1.5).
+      const job = await TenantContext.runAsSystem(
+        'queue-drain: claim next job',
+        () => this.queueService.getNextJob(Object.values(JobType)),
+      );
       if (!job) break;
 
-      await this.processJobInternal(job);
+      await TenantContext.run({ tenantId: job.tenantId }, () =>
+        this.processJobInternal(job),
+      );
       processed++;
     }
 
     if (processed > 0) {
       this.logger.log(`Drained ${processed} job(s) from the queue`);
     }
-    return processed;
+
+    // No natural "eligible tenants" denominator for a priority-claim loop —
+    // `eligible: null` per `JobScopeEvidence`'s documented meaning ("not
+    // applicable"), so the suspect check in job-dispatch.service.ts never
+    // fires for this job.
+    return {
+      drained: processed,
+      scope: { eligible: null, scanned: processed },
+    };
   }
 
   private async startProcessorLoop(): Promise<void> {

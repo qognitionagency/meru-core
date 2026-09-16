@@ -73,6 +73,15 @@ export class WorkflowInstance {
     toState: string;
     transitionId: string;
     triggeredBy: string;
+    /**
+     * ADR 0018 §4.2 — present (and `true`) only when a scheduled job, not a
+     * human, triggered this transition. Genuinely absent otherwise, not
+     * `false`, so an entry written before this field existed and an ordinary
+     * human transition after it stay indistinguishable.
+     */
+    automated?: boolean;
+    /** e.g. 'sla-watchdog:auto_approve'. Present only alongside `automated`. */
+    automatedBy?: string;
     context: Record<string, any>;
   }>;
 

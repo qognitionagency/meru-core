@@ -27,6 +27,8 @@ import {
 } from './interfaces/job.interface';
 import { randomUUID } from 'node:crypto';
 import { CronExpressionParser } from 'cron-parser';
+import { runTenantBoundSweep } from '../core/tenancy/tenant-bound-sweep';
+import { JobScopeEvidence } from '../jobs/job-catalogue';
 
 @Injectable()
 export class QueueService implements OnModuleInit {
@@ -515,16 +517,30 @@ export class QueueService implements OnModuleInit {
   }
 
   @Cron(CronExpression.EVERY_MINUTE)
-  async processScheduledJobs(): Promise<void> {
-    const scheduledJobs = await this.scheduledRepo.find({
-      where: {
-        isActive: true,
-        nextRun: LessThan(new Date()),
-      },
-    });
-
-    for (const scheduled of scheduledJobs) {
-      try {
+  async processScheduledJobs(): Promise<{
+    scheduled: number;
+    scope: JobScopeEvidence;
+  }> {
+    // ADR 0018, Anton's secops review point 1 — the ninth job with the same
+    // defect the rest of this ADR closes: dispatched from
+    // `job-dispatch.service.ts`'s `'scheduled-jobs'` case
+    // (`JOB_CADENCE_MINUTES['scheduled-jobs']`), this ran outside any tenant
+    // context, so the RLS-bound connection matched zero rows on every
+    // tenant's `queue_scheduled_jobs` and no recurring cron-style job was
+    // ever created. `runTenantBoundSweep` enumerates cross-tenant under
+    // system context, then binds `createJob` and the `scheduledRepo.save`
+    // that follows it to the scheduled job's own tenant for the full
+    // duration of processing it.
+    const sweep = await runTenantBoundSweep<QueueScheduledJob>(
+      'scheduled jobs',
+      () =>
+        this.scheduledRepo.find({
+          where: {
+            isActive: true,
+            nextRun: LessThan(new Date()),
+          },
+        }),
+      async (scheduled) => {
         // Create job
         await this.createJob(
           scheduled.tenantId,
@@ -549,12 +565,17 @@ export class QueueService implements OnModuleInit {
         }
 
         await this.scheduledRepo.save(scheduled);
-      } catch (error) {
-        this.logger.error(
-          `Failed to process scheduled job ${scheduled.id}: ${error.message}`,
-        );
-      }
-    }
+      },
+    );
+
+    return {
+      scheduled: sweep.itemsProcessed,
+      scope: {
+        eligible: sweep.eligible,
+        scanned: sweep.scanned,
+        failures: sweep.failures,
+      },
+    };
   }
 
   private async logJobEvent(

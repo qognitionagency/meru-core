@@ -209,9 +209,17 @@ export class RegulatoryRadarEngine {
   // ── Scheduled scan (1 AM UTC daily) ──────────────────────────────────────
 
   @Cron(CronExpression.EVERY_DAY_AT_1AM)
-  async scheduledScan(): Promise<void> {
+  async scheduledScan(): Promise<RadarScanResult | void> {
     if (!this.radarEnabled) return;
-    await this.runScan();
+    // ADR 0018 §9.15 — `JobDispatchService`'s `'regulatory-radar'` handler
+    // calls this directly, and `run()` reads whatever it returns as the
+    // job's `summary`. Discarding `runScan()`'s result here meant a scan that
+    // errored on every source still produced no evidence of that at
+    // `/jobs/status` — a well-formed 200 with nothing inside it. No `scope`
+    // key: this job touches no tenant-scoped table, so `JobScopeEvidence`'s
+    // `eligible: number | null` contract is correctly "nothing to report",
+    // not zero.
+    return this.runScan();
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────

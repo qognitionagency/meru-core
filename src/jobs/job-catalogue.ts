@@ -9,10 +9,26 @@
  * on neither side of that relationship.
  */
 
+/**
+ * ADR 0018 §3 — what a sweep reports about how much of the tenant base it
+ * actually reached, distinguishing "genuinely found nothing" from "blocked
+ * by an unbound TenantContext" (both would otherwise look like `[]`).
+ */
+export interface JobScopeEvidence {
+  /** `null` = this job has no tenant-scoped work, the check does not apply. */
+  eligible: number | null;
+  scanned: number;
+  failures?: Array<{ tenantId?: string; itemId?: string; message: string }>;
+}
+
 export interface JobResult {
   job: string;
   status: 'ok';
   durationMs: number;
+  /** Whatever the handler returned — job-specific. */
+  summary?: Record<string, unknown>;
+  /** Lifted from `summary.scope` by convention. See `job-dispatch.service.ts`. */
+  scope?: JobScopeEvidence;
 }
 
 export interface TickResult {

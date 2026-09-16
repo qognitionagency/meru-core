@@ -18,6 +18,8 @@ export interface JobStatusRow {
   overdue: boolean;
   /** Minutes since the last run, or null if it has never run. */
   minutesSinceLastRun: number | null;
+  /** ADR 0018 §3 — `JobScopeEvidence`, or null if this job never reported one. */
+  lastScope: Record<string, unknown> | null;
 }
 
 /**
@@ -56,7 +58,13 @@ export class JobRunService {
    */
   async record(
     jobName: string,
-    outcome: { status: 'ok' | 'failed'; durationMs: number; error?: string },
+    outcome: {
+      status: 'ok' | 'failed' | 'suspect';
+      durationMs: number;
+      error?: string;
+      /** ADR 0018 §3 — `JobScopeEvidence`, when the handler reported one. */
+      scope?: Record<string, unknown>;
+    },
   ): Promise<void> {
     try {
       await TenantContext.runAsSystem('record job run', async () => {
@@ -64,13 +72,16 @@ export class JobRunService {
           // $2 is cast explicitly at every use. Without the casts Postgres
           // sees it as varchar(20) in the column position and as the operand
           // of `= 'ok'` elsewhere, and rejects the whole statement with
-          // "inconsistent types deduced for parameter $2".
+          // "inconsistent types deduced for parameter $2". 'suspect' (ADR
+          // 0018 §3.2) is deliberately treated as a failure by the CASE
+          // expressions below — "completed without throwing but scanned
+          // nothing" must not read as success.
           `INSERT INTO job_runs
              ("jobName","lastRunAt","lastStatus","lastDurationMs","lastError",
-              "lastSuccessAt","runCount","failCount","updatedAt")
+              "lastSuccessAt","runCount","failCount","updatedAt","scope")
            VALUES ($1, now(), $2::text, $3, $4,
                    CASE WHEN $2::text = 'ok' THEN now() ELSE NULL END, 1,
-                   CASE WHEN $2::text = 'ok' THEN 0 ELSE 1 END, now())
+                   CASE WHEN $2::text = 'ok' THEN 0 ELSE 1 END, now(), $5::jsonb)
            ON CONFLICT ("jobName") DO UPDATE SET
              "lastRunAt"      = now(),
              "lastStatus"     = EXCLUDED."lastStatus",
@@ -83,8 +94,15 @@ export class JobRunService {
              "runCount"       = job_runs."runCount" + 1,
              "failCount"      = job_runs."failCount" +
                                 CASE WHEN EXCLUDED."lastStatus" = 'ok' THEN 0 ELSE 1 END,
-             "updatedAt"      = now()`,
-          [jobName, outcome.status, outcome.durationMs, outcome.error ?? null],
+             "updatedAt"      = now(),
+             "scope"          = EXCLUDED."scope"`,
+          [
+            jobName,
+            outcome.status,
+            outcome.durationMs,
+            outcome.error ?? null,
+            outcome.scope ?? null,
+          ],
         );
       });
     } catch (err) {
@@ -134,6 +152,7 @@ export class JobRunService {
         lastStatus: r?.lastStatus ?? null,
         lastDurationMs: r?.lastDurationMs ?? null,
         lastError: r?.lastError ?? null,
+        lastScope: r?.scope ?? null,
         runCount: r?.runCount ?? 0,
         failCount: r?.failCount ?? 0,
         // Two full intervals, not one: a scheduler firing on the cadence

@@ -53,7 +53,12 @@ export class JobStatusController {
     return {
       jobs,
       overdue: jobs.filter((j) => j.overdue).map((j) => j.job),
-      failing: jobs.filter((j) => j.lastStatus === 'failed').map((j) => j.job),
+      // 'suspect' (ADR 0018 §3.2) reddens this tile too — a job that
+      // completed without throwing but scanned zero of its eligible tenants
+      // is the signature of an unbound TenantContext, not health.
+      failing: jobs
+        .filter((j) => j.lastStatus === 'failed' || j.lastStatus === 'suspect')
+        .map((j) => j.job),
     };
   }
 }

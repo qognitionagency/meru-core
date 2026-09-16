@@ -20,7 +20,7 @@ import { NotificationDispatchService } from '../notifications/notification-dispa
 import { WatchlistIngestService } from '../ai/engines/watchlist-ingest.service';
 import { ScreeningEngine } from '../ai/engines/screening.engine';
 import { RescreeningService } from '../ai/engines/rescreening.service';
-import { JOB_NAMES, JobName, JobResult } from './job-catalogue';
+import { JOB_NAMES, JobName, JobResult, JobScopeEvidence } from './job-catalogue';
 
 /**
  * The single implementation of "run one named job", extracted from
@@ -93,10 +93,35 @@ export class JobDispatchService {
 
     try {
       const result = await this.run(job, this.handlerFor(job as JobName));
+
+      // ADR 0018 §3.2 — the actual ambiguity fix. A sweep that genuinely
+      // found zero due items across every eligible tenant reports
+      // `scope: { eligible: N, scanned: N }`, status 'ok'. A sweep blocked by
+      // an unbound TenantContext reports `scanned: 0` against a positive
+      // `eligible` — indistinguishable from 'ok' before this change, even by
+      // someone reading `lastStatus` directly.
+      const scope = result.scope;
+      const suspect =
+        !!scope &&
+        scope.eligible !== null &&
+        scope.eligible > 0 &&
+        scope.scanned === 0;
+
       await this.jobRunService.record(job, {
-        status: 'ok',
+        status: suspect ? 'suspect' : 'ok',
         durationMs: result.durationMs,
+        scope: scope as Record<string, unknown> | undefined,
       });
+
+      if (suspect) {
+        this.logger.error(
+          `Job "${job}" completed without throwing but scanned 0 of ` +
+            `${scope!.eligible} eligible tenants — the signature of an ` +
+            `unbound TenantContext, not a genuinely empty result. Treat as ` +
+            `failed, not ok.`,
+        );
+      }
+
       return result;
     } catch (error) {
       const message =
@@ -177,10 +202,21 @@ export class JobDispatchService {
     this.logger.log(`Cron job "${job}" started`);
 
     try {
-      await fn();
+      const returned = await fn();
       const durationMs = Date.now() - startedAt;
       this.logger.log(`Cron job "${job}" completed in ${durationMs}ms`);
-      return { job, status: 'ok', durationMs };
+
+      // ADR 0018 §3.1 — every scope-aware handler puts its evidence at
+      // `summary.scope`, by convention; a handler with nothing to report
+      // (e.g. `regulatory-radar`, which touches no tenant-scoped table)
+      // simply omits it, and `scope` stays undefined here.
+      const summary =
+        returned && typeof returned === 'object'
+          ? (returned as Record<string, unknown>)
+          : undefined;
+      const scope = summary?.scope as JobScopeEvidence | undefined;
+
+      return { job, status: 'ok', durationMs, summary, scope };
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message =

@@ -45,6 +45,7 @@ import { AddRecordNumbering1756900000000 } from '../migrations/1756900000000-Add
 import { BackfillRecordNumbers1756910000000 } from '../migrations/1756910000000-BackfillRecordNumbers';
 import { AddLeadIntake1757000000000 } from '../migrations/1757000000000-AddLeadIntake';
 import { AddUserPractitionerCredential1756920000000 } from '../migrations/1756920000000-AddUserPractitionerCredential';
+import { AddJobRunScope1757200000000 } from '../migrations/1757200000000-AddJobRunScope';
 
 /**
  * Every migration, bundled. The Vercel serverless bundle cannot glob the
@@ -122,4 +123,11 @@ export const ALL_MIGRATIONS = [
   // array: "migration on disk, missing from ALL_MIGRATIONS" has been a real
   // production bug four times in this repo.
   AddLeadIntake1757000000000,
+  // ADR 0018 — scope evidence on job_runs, so a sweep blocked by an unbound
+  // TenantContext stops reading as "ok" with zero rows scanned. Registered in
+  // the same commit as the migration file, per this array's own standing
+  // instruction. 1757200000000, not the ADR's originally-cited
+  // 1757100000000 — that slot was already taken by AddIamAuditActions above
+  // by the time this landed.
+  AddJobRunScope1757200000000,
 ];

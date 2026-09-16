@@ -35,7 +35,12 @@ export class JobRun {
   @Column({ type: 'timestamptz' })
   lastRunAt: Date;
 
-  /** 'ok' | 'failed' — kept as text so a new outcome needs no migration. */
+  /**
+   * 'ok' | 'failed' | 'suspect' — kept as text so a new outcome needs no
+   * migration. 'suspect' (ADR 0018 §3.2) means the job completed without
+   * throwing but scanned zero of its eligible tenants — the signature of an
+   * unbound TenantContext, not a genuinely empty result.
+   */
   @Column({ type: 'varchar', length: 20 })
   lastStatus: string;
 
@@ -54,6 +59,16 @@ export class JobRun {
 
   @Column({ type: 'int', default: 0 })
   failCount: number;
+
+  /**
+   * ADR 0018 §3 — `JobScopeEvidence`: `eligible` vs `scanned` tenants, plus
+   * any per-item `failures`. Nullable and additive (migration
+   * `1757200000000-AddJobRunScope`); a job with nothing to report about scope
+   * (e.g. `regulatory-radar`, which touches no tenant-scoped table) leaves it
+   * `null`, not `{}`.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  scope: Record<string, unknown> | null;
 
   @UpdateDateColumn()
   updatedAt: Date;

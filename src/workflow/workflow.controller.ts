@@ -251,6 +251,7 @@ export class WorkflowController {
       tenantId: req.user.tenantId,
       transitionId: dto.transitionId,
       userId: req.user.id,
+      userEmail: req.user.email,
       // Needed by `checkPermissions`: a transition materialised from a pack
       // carries `permissions.roles` and no `users`, so the actor's own roles
       // are the only thing that can satisfy it.

@@ -120,8 +120,8 @@ describe('WorkflowEngineService.transition — automated attribution & audit (AD
     expect(call.severity).toBe('critical');
   });
 
-  it('an ordinary transition (automated unset) is byte-for-byte unchanged: triggeredBy is the human userId, no automated/automatedBy keys at all, and no audit write', async () => {
-    const { service, instance, auditService } = buildService();
+  it('an ordinary transition (automated unset) is byte-for-byte unchanged on history: triggeredBy is the human userId, no automated/automatedBy keys at all', async () => {
+    const { service, instance } = buildService();
 
     await service.transition({
       instanceId: instance.id,
@@ -139,7 +139,63 @@ describe('WorkflowEngineService.transition — automated attribution & audit (AD
     // entry and an ordinary human transition after it must be indistinguishable.
     expect('automated' in entry).toBe(false);
     expect('automatedBy' in entry).toBe(false);
-    expect(auditService.logEvent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Audit coverage for a human-triggered transition — this was a real gap:
+   * `AuditService.logWorkflowTransition` existed with zero callers, so
+   * `POST /workflows/instances/:id/transition` wrote nothing to `audit_logs`
+   * for the overwhelmingly common case (a human advancing a matter), and only
+   * the rare automated path was covered.
+   */
+  it('an ordinary (human) transition writes exactly one audit row, with from/to state and the acting user, distinct in shape from the automated CRITICAL entry', async () => {
+    const { service, instance, auditService } = buildService();
+
+    await service.transition({
+      instanceId: instance.id,
+      tenantId: TENANT,
+      transitionId: 'trans-1',
+      userId: 'human-1',
+      userEmail: 'human-1@example.test',
+      userRoles: [PlatformRole.FIRM_ADMIN],
+      context: {},
+    });
+
+    expect(auditService.logEvent).toHaveBeenCalledTimes(1);
+    const call = auditService.logEvent.mock.calls[0][0];
+    expect(call.tenantId).toBe(TENANT);
+    expect(call.userId).toBe('human-1');
+    expect(call.userEmail).toBe('human-1@example.test');
+    expect(call.entityId).toBe(instance.id);
+    expect(call.entityType).toBe('workflow_instance');
+    expect(call.beforeState).toEqual({ state: 'state-a' });
+    expect(call.afterState).toEqual({ state: 'state-b' });
+    expect(call.context.transitionId).toBe('trans-1');
+    // Not the automated shape — no CRITICAL severity, no `automated` key.
+    expect(call.severity).toBeUndefined();
+    expect(call.context.automated).toBeUndefined();
+  });
+
+  it('a human transition still succeeds and returns the updated instance even when the post-commit audit write fails — fail-OPEN, logged, never propagated (the transition already happened; failing closed here would report a real state change as a failure)', async () => {
+    const failingAudit = jest.fn().mockRejectedValue(new Error('audit db down'));
+    const { service, instance } = buildService({ auditLogEvent: failingAudit });
+
+    const result = await service.transition({
+      instanceId: instance.id,
+      tenantId: TENANT,
+      transitionId: 'trans-1',
+      userId: 'human-1',
+      userRoles: [PlatformRole.FIRM_ADMIN],
+      context: {},
+    });
+
+    // The transition itself completed — commitTransaction ran, the history
+    // entry landed — and the method returned the (re-fetched) instance
+    // rather than throwing, despite the audit write below rejecting.
+    expect(result).toBeDefined();
+    expect(instance.history).toHaveLength(1);
+    expect(instance.history[0].triggeredBy).toBe('human-1');
+    expect(failingAudit).toHaveBeenCalledTimes(1);
   });
 
   it('a transition whose permissions.roles includes firm_admin succeeds when called with SYSTEM_ACTOR.roles', async () => {

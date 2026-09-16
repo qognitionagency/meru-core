@@ -60,6 +60,12 @@ export interface TransitionRequest {
   transitionId?: string;
   userId: string;
   /**
+   * The acting user's own email, for the audit entry only — never used in
+   * any authorisation decision. Optional so existing callers keep compiling;
+   * absent means the audited entry simply carries no email, not a failure.
+   */
+  userEmail?: string;
+  /**
    * The roles the caller actually holds, for `checkPermissions`.
    *
    * Optional so existing callers keep compiling, but pass it: without it a
@@ -631,15 +637,20 @@ export class WorkflowEngineService {
         });
     }
 
+    // Captured before the transactional queryRunner opens — pure reads, no
+    // side effects — so both the history push below and the human-triggered
+    // audit write after commit can use them without re-deriving anything.
+    const oldState = instance.currentState;
+    const newState = transition.toState;
+
     // Execute transition
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
-    try {
-      const oldState = instance.currentState;
-      const newState = transition.toState;
+    let updatedInstance: WorkflowInstance;
 
+    try {
       // Update context
       const newContext = {
         ...instance.context,
@@ -707,13 +718,89 @@ export class WorkflowEngineService {
         `Transition executed: ${instance.id} (${oldState.name} -> ${newState.name})`,
       );
 
-      return this.findInstanceOrThrow(instance.id, request.tenantId);
+      updatedInstance = await this.findInstanceOrThrow(
+        instance.id,
+        request.tenantId,
+      );
     } catch (error) {
       await queryRunner.rollbackTransaction();
       throw error;
     } finally {
       await queryRunner.release();
     }
+
+    // A human-triggered transition writes its own audit entry — the
+    // automated path above already wrote one, before the transaction, and
+    // that write is deliberately NOT duplicated here.
+    //
+    // Deliberately written AFTER `queryRunner.release()`, not before the
+    // transaction the way the automated write is: `AuditService.logEvent`
+    // goes through its own repository, i.e. its own connection acquisition,
+    // and the runtime pool is `{ max: 1 }` (CLAUDE.md §10) — acquiring a
+    // second connection while this method's own queryRunner still held the
+    // only one would either block for the full connectionTimeoutMillis or
+    // deadlock outright. Writing here means the audit connection is
+    // requested only once the transactional one is back in the pool.
+    //
+    // The trade this makes, and it is a deliberate one: unlike the
+    // automated path's audit-before-transition (fail-closed, because that
+    // action has no human decision-maker and the audit IS the only record
+    // it happened at all — ADR 0018 §4), a human transition has already
+    // committed by the time this runs. Failing closed here would tell the
+    // caller the transition failed when it did not, which is a worse lie
+    // than an unaudited row. So this is fail-OPEN: caught and logged, never
+    // rethrown, matching the "audit after the save, not the gate to it"
+    // convention this codebase already uses for other human-triggered
+    // writes (`DocumentsService.decideReview`, ADR 0025 §12).
+    if (!request.automated) {
+      await this.auditService
+        .logEvent({
+          tenantId: instance.tenantId,
+          userId: request.userId,
+          userEmail: request.userEmail,
+          action: AuditAction.WORKFLOW_TRANSITION,
+          entityType: 'workflow_instance',
+          entityId: instance.id,
+          description: `Transitioned from '${oldState.name}' to '${newState.name}'`,
+          beforeState: { state: oldState.name },
+          afterState: { state: newState.name },
+          context: {
+            transitionId: transition.id,
+            // The record this instance is actually about — a matter, a
+            // case — distinct from `entityId` above, which is the
+            // `workflow_instance` row's own id.
+            recordEntityId: instance.entityId,
+            recordEntityType: instance.entityType,
+            // ADR 0027 D4/§6 — present only when this transition's
+            // requiresSignOff gate was satisfied, mirroring the history
+            // entry. The full credential number is public-register data
+            // (a firm's own MARN/OISC/RCIC registration), not a secret, so
+            // it is stored here the same way it already is in
+            // `WorkflowInstance.history[]` — see ADR 0027 D5.
+            ...(transition.permissions.requiresSignOff && signOffActor
+              ? {
+                  signedOffBy: request.userId,
+                  signedOffCredential: {
+                    type: signOffActor.practitionerCredentialType,
+                    number: signOffActor.practitionerCredential,
+                  },
+                }
+              : {}),
+          },
+        })
+        .catch((error) => {
+          // Fail-open, by design (see the comment above): the transition
+          // already committed. This is the one place in this method an
+          // audit-write failure does NOT propagate.
+          this.logger.error(
+            `Failed to write audit entry for transition on instance ` +
+              `${instance.id} (${oldState.name} -> ${newState.name}): ` +
+              (error instanceof Error ? error.message : String(error)),
+          );
+        });
+    }
+
+    return updatedInstance;
   }
 
   // ==================== PRIVATE HELPERS ====================

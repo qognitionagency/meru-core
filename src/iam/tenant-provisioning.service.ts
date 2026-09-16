@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
@@ -15,7 +16,7 @@ import {
   TenantPlan,
   VerticalType,
 } from './entities/tenant.entity';
-import { User } from './entities/user.entity';
+import { User, UserStatus } from './entities/user.entity';
 import { TenantSetting } from '../tenant/entities/tenant-setting.entity';
 import { TenantSignupInvite } from './entities/tenant-signup-invite.entity';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
@@ -735,6 +736,71 @@ export class TenantProvisioningService {
       inviteUrl: invite.inviteUrl,
       connectorsEnabled: dto.connectors ?? [],
     };
+  }
+
+  /**
+   * Resolve which invited firm admin `POST /tenants/:tenantId/admin-invite/resend`
+   * targets. Caller wraps the whole route in `runAsGod` — this only decides
+   * WHO, not whether the caller may act; that gate is `@Roles(PLATFORM_ADMIN)`
+   * on the controller.
+   *
+   * The operator recovery path `provisionTenant`'s own `inviteUrl` doc comment
+   * describes: a provisioning invite gets lost or expires, and
+   * `POST /iam/users/:id/resend-invite` cannot reach it because that route is
+   * scoped to the CALLER's own tenant (`req.user.tenantId`) and the operator
+   * who provisioned the tenant is not a member of it.
+   *
+   * Deliberately narrow to `firm_admin` — this is "resend the admin invite",
+   * not a general per-user resend for every role a tenant might carry.
+   */
+  async resolveAdminInviteTarget(
+    tenantId: string,
+    userId?: string,
+  ): Promise<User> {
+    const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+    if (!tenant) throw new NotFoundException('Tenant not found');
+
+    if (userId) {
+      const user = await this.userRepo.findOne({
+        where: { id: userId, tenantId },
+      });
+      if (!user) throw new NotFoundException('No such user on this tenant');
+      if (!(user.roles ?? []).includes(PlatformRole.FIRM_ADMIN)) {
+        throw new BadRequestException(
+          'That user is not a firm admin on this tenant',
+        );
+      }
+      if (user.status !== UserStatus.INVITED) {
+        throw new ConflictException(
+          'That user has already accepted their invitation. Use password reset instead.',
+        );
+      }
+      return user;
+    }
+
+    const pendingAdmins = (
+      await this.userRepo.find({
+        where: { tenantId, status: UserStatus.INVITED },
+        order: { createdAt: 'DESC' },
+      })
+    ).filter((u) => (u.roles ?? []).includes(PlatformRole.FIRM_ADMIN));
+
+    if (pendingAdmins.length === 0) {
+      // Distinct from "unknown tenant" above: the tenant is real, but there is
+      // nobody in `invited` status to resend to — either nobody was ever
+      // invited as firm_admin, or they already accepted.
+      throw new NotFoundException(
+        'No pending firm admin invite on this tenant',
+      );
+    }
+    if (pendingAdmins.length > 1) {
+      throw new BadRequestException({
+        message:
+          'More than one pending firm admin invite on this tenant — pass userId',
+        userIds: pendingAdmins.map((u) => u.id),
+      });
+    }
+    return pendingAdmins[0];
   }
 
   /**

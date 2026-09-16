@@ -181,6 +181,59 @@ describe('IamService — IAM audit coverage', () => {
     );
   });
 
+  /**
+   * On the same-tenant route (`UsersController.resendInvite`), `name` IS the
+   * caller's email — `req.user.email`, passed straight through — so the audit
+   * row's `userEmail` has always matched. This pins that unchanged.
+   */
+  it('invite resend audits the caller\'s email when no auditEmail is given (same-tenant route, unchanged)', async () => {
+    const { service, users, auditEvents } = build();
+    seed(users, { id: 'u1', status: UserStatus.INVITED });
+
+    await service.resendInvite(T, 'u1', { id: ADMIN.id, name: ADMIN.email });
+
+    expect(auditEvents).toContainEqual(
+      expect.objectContaining({
+        action: AuditAction.INVITE_RESENT,
+        userEmail: ADMIN.email,
+      }),
+    );
+  });
+
+  /**
+   * The God View admin-invite-resend route (`TenantProvisioningController`)
+   * names the mail sender "Meru Platform" — the recipient has never heard of
+   * the individual operator — but the audit trail must still name the REAL
+   * operator. `auditEmail` is the seam: when given, it overrides `name` for
+   * the audit row only; the mail body still gets `name`. Found by Anton's
+   * review: `name` was previously the only source for both, so the audit row
+   * would have recorded "Meru Platform" as the actor, not the operator who
+   * actually triggered the resend.
+   */
+  it('invite resend audits auditEmail, not the mail display name, when the two diverge', async () => {
+    const { service, users, auditEvents } = build();
+    seed(users, { id: 'u1', status: UserStatus.INVITED });
+
+    await service.resendInvite(T, 'u1', {
+      id: ADMIN.id,
+      name: 'Meru Platform',
+      auditEmail: ADMIN.email,
+    });
+
+    expect(auditEvents).toContainEqual(
+      expect.objectContaining({
+        action: AuditAction.INVITE_RESENT,
+        userEmail: ADMIN.email,
+      }),
+    );
+    expect(auditEvents).not.toContainEqual(
+      expect.objectContaining({
+        action: AuditAction.INVITE_RESENT,
+        userEmail: 'Meru Platform',
+      }),
+    );
+  });
+
   it('a password-reset request writes an audit row scoped to the account holder', async () => {
     const { service, users, auditEvents } = build();
     seed(users, { id: 'u1' });

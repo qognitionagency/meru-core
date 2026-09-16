@@ -960,11 +960,23 @@ export class IamService {
    *
    * Same posture as `mintSignupInvite`. It is not a way to reach an active
    * account: the guard below refuses anyone who is not still `INVITED`.
+   *
+   * `invitedBy.name` is what the recipient sees in the mail body
+   * (`inviterName`) and, by the same-tenant convention this codebase already
+   * follows (see `inviteUser` above), doubles as the audit row's `userEmail`
+   * when nothing else is given — because on that route the caller's display
+   * name IS their email (`UsersController` passes `req.user.email` as `name`).
+   * `auditEmail` is additive, for the one caller where those two now diverge:
+   * the God View admin-invite-resend route names the mail sender "Meru
+   * Platform" (the recipient has never heard of the individual operator) but
+   * must still audit the REAL operator, so it passes `req.user.email` here
+   * separately. Optional and defaults to `name`, so the same-tenant route's
+   * behaviour is unchanged byte-for-byte.
    */
   async resendInvite(
     tenantId: string,
     userId: string,
-    invitedBy?: { id: string; name: string },
+    invitedBy?: { id: string; name: string; auditEmail?: string },
   ): Promise<{
     email: string;
     inviteSent: boolean;
@@ -1014,7 +1026,11 @@ export class IamService {
     await this.audit({
       tenantId,
       userId: invitedBy?.id ?? user.id,
-      userEmail: invitedBy?.name,
+      // The real operator, not the mail's display name — see this method's
+      // doc comment. `auditEmail` falls back to `name` so a caller that only
+      // ever passed `{id, name}` (the same-tenant route) audits exactly as
+      // it always has.
+      userEmail: invitedBy?.auditEmail ?? invitedBy?.name,
       action: AuditAction.INVITE_RESENT,
       entityType: 'user',
       entityId: user.id,

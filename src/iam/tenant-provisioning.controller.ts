@@ -15,6 +15,7 @@ import {
   HttpStatus,
   UseGuards,
   Request,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import {
@@ -34,6 +35,7 @@ import { TenantProvisioningService } from './tenant-provisioning.service';
 // skipped entirely — the same silent no-op that made this an interface a bug.
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { MintTenantSignupInviteDto } from './dto/mint-tenant-signup-invite.dto';
+import { ResendAdminInviteDto } from './dto/resend-admin-invite.dto';
 import { CheckSlugDto } from './dto/check-slug.dto';
 import { DeleteTenantDto } from './dto/delete-tenant.dto';
 import { TenantPlan, TenantStatus } from './entities/tenant.entity';
@@ -181,6 +183,87 @@ export class TenantProvisioningController {
             req.user.roles,
           ),
         ),
+    );
+  }
+
+  @Post(':tenantId/admin-invite/resend')
+  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @Roles(PlatformRole.PLATFORM_ADMIN)
+  @ApiBearerAuth('JWT-auth')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Re-send a tenant's firm-admin provisioning invite (God View)",
+    description:
+      'The operator recovery path when `POST /tenants` returned `inviteSent: ' +
+      'false`, or the original link was lost, or it has expired. ' +
+      '`POST /iam/users/:id/resend-invite` cannot reach this: it is scoped to ' +
+      "the caller's own tenant, and a platform operator is not a member of a " +
+      'tenant they just provisioned. platform_admin only, cross-tenant write ' +
+      '→ `runAsGod` + CRITICAL audit entry, same convention as `POST /tenants` ' +
+      'and `POST /tenants/invitations`. Reuses `IamService.resendInvite` — ' +
+      'issues a fresh token (invalidating the previous one) and re-sends the ' +
+      'same invite mail; the underlying `INVITE_RESENT` audit row is filed ' +
+      'under the target tenant, unchanged from the same-tenant route. ' +
+      'Body `userId` is only needed when the tenant has more than one ' +
+      'pending firm-admin invite; with none supplied it targets the tenant\'s ' +
+      'single still-`invited` firm admin.',
+  })
+  @ApiParam({ name: 'tenantId', description: 'Tenant id', format: 'uuid' })
+  @ApiResponse({ status: 200, description: 'Invitation re-sent' })
+  @ApiResponse({ status: 403, description: 'Requires platform_admin' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'Unknown tenant, no matching user on that tenant, or no pending ' +
+      'firm-admin invite to resend',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Malformed tenantId; or more than one pending firm-admin invite and ' +
+      'no userId was given to disambiguate; or the named user is not a ' +
+      'firm admin',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'That user has already accepted their invitation',
+  })
+  async resendAdminInvite(
+    @Request() req: AuthenticatedRequest,
+    // `ParseUUIDPipe` only on this route: a malformed id would otherwise
+    // reach `resolveAdminInviteTarget`'s raw query and come back as a
+    // Postgres `22P02` (invalid input syntax for type uuid), a 500 that
+    // looks like a database fault rather than the client error it is.
+    // Not added to the older routes on this controller (`:id/suspend` etc.)
+    // — out of scope for this change; they take a plain string today.
+    @Param('tenantId', ParseUUIDPipe) tenantId: string,
+    @Body() dto: ResendAdminInviteDto,
+  ) {
+    // Audited under `tenantId` (the tenant whose admin invite is being
+    // resent), not the operator's own tenant — same convention as
+    // suspend/resume/getStats above.
+    return this.tenancyService.runAsGod(
+      req.user.id,
+      tenantId,
+      `Resend admin invite for tenant ${tenantId} (God View)`,
+      async () => {
+        const target = await this.tenantProvisioningService.resolveAdminInviteTarget(
+          tenantId,
+          dto?.userId,
+        );
+        const result = await this.iamService.resendInvite(tenantId, target.id, {
+          id: req.user.id,
+          // Matches `provisionTenant`'s own invite call: the recipient has
+          // never heard of the individual operator, only of Meru.
+          name: 'Meru Platform',
+          // But the audit trail must still name the real operator, not the
+          // mail's display name — see `IamService.resendInvite`'s doc
+          // comment. `req.user.email` is server-derived from the JWT, never
+          // client input.
+          auditEmail: req.user.email,
+        });
+        return { tenantId, userId: target.id, ...result };
+      },
     );
   }
 

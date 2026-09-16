@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -16,6 +17,7 @@ import {
   DocumentStatus,
   DocumentEncryption,
   DocumentType,
+  DocumentReviewHistoryEntry,
 } from './entities/document.entity';
 import {
   DocumentVersion,
@@ -34,6 +36,10 @@ import { RequestDocumentUploadUrlDto } from './dto/request-upload-url.dto';
 import { OrchestrationService } from '../orchestration/orchestration.service';
 import { DocumentAccessService } from './document-access.service';
 import { DocumentRequestService } from './document-request.service';
+import { ReviewDecisionDto } from './dto/review-decision.dto';
+import { VerticalPackService } from '../tenant/services/vertical-pack.service';
+import { AuditService } from '../audit/audit.service';
+import { MeruErrorCode } from '../common/types';
 import type { Actor } from '../common/access';
 
 // Exported because the controller now returns it directly (it used to be
@@ -69,6 +75,10 @@ export class DocumentsService {
     // Bookkeeping only: whether a document arriving satisfies the pack
     // checklist, and therefore whether a document chase should stop.
     private documentRequests: DocumentRequestService,
+    // ADR 0025 — the tenant's resolved rejection-reason vocabulary lives in
+    // the pack, never hardcoded (CLAUDE.md §5.5).
+    private readonly packs: VerticalPackService,
+    private readonly auditService: AuditService,
   ) {}
 
   async upload(
@@ -517,6 +527,34 @@ export class DocumentsService {
       document.fileSize = file.size;
       document.updatedAt = new Date();
 
+      // ADR 0025 D3 — "request re-upload" (FR-6.6) means something only if a
+      // rejected document re-enters review rather than sitting `rejected`
+      // forever with a newer file nobody has looked at attached to it. The
+      // prior decision (if any) is preserved in `reviewHistory`, in the same
+      // transaction as the version insert — a partial write here would leave
+      // a document showing a stale approved/rejected status against a file
+      // nobody has actually seen.
+      if (document.reviewStatus !== 'uploaded') {
+        const entry: DocumentReviewHistoryEntry = {
+          status: document.reviewStatus as 'under_review' | 'approved' | 'rejected',
+          byId: document.reviewedById ?? 'unknown',
+          at: (document.reviewedAt ?? new Date()).toISOString(),
+          versionNumber: document.versionNumber - 1,
+          ...(document.rejectionReasonKey
+            ? { rejectionReasonKey: document.rejectionReasonKey }
+            : {}),
+          ...(document.rejectionReasonNote
+            ? { rejectionReasonNote: document.rejectionReasonNote }
+            : {}),
+        };
+        document.reviewHistory = [...(document.reviewHistory ?? []), entry];
+        document.reviewStatus = 'uploaded';
+        document.reviewedById = null;
+        document.reviewedAt = null;
+        document.rejectionReasonKey = null;
+        document.rejectionReasonNote = null;
+      }
+
       await queryRunner.manager.save(document);
 
       await queryRunner.commitTransaction();
@@ -922,6 +960,141 @@ export class DocumentsService {
       'DOCUMENT_ENCRYPTION_KEY',
       'default-encryption-key-32-chars!',
     );
+  }
+
+  /**
+   * ADR 0025 D3 — `POST /documents/:id/review/start`. `uploaded → under_review`
+   * only; a courtesy state so a client portal can honestly render "we're
+   * looking at it" rather than only ever "uploaded" then suddenly "approved".
+   * Not a required gate: `decideReview` may be called directly from
+   * `uploaded`.
+   */
+  async startReview(
+    id: string,
+    tenantId: string,
+    actor: Actor,
+  ): Promise<Document> {
+    const document = await this.documentRepo.findOne({
+      where: { id, tenantId },
+    });
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, actor, 'write');
+
+    if (document.reviewStatus === 'approved' || document.reviewStatus === 'rejected') {
+      throw new ConflictException({
+        code: MeruErrorCode.RESOURCE_VERSION_CONFLICT,
+        message:
+          `Document is already '${document.reviewStatus}'. Call ` +
+          `review/decision again to change the outcome.`,
+      });
+    }
+
+    if (document.reviewStatus === 'uploaded') {
+      document.reviewStatus = 'under_review';
+      await this.documentRepo.save(document);
+    }
+
+    // No-op on an already under_review document, 200 either way — see D3.
+    return document;
+  }
+
+  /**
+   * ADR 0025 D3 — `POST /documents/:id/review/decision`. Any `reviewStatus`
+   * except the target itself may move to `approved` or `rejected`, including
+   * re-deciding an already-decided document (a staff member correcting their
+   * own mistake) and deciding directly from `uploaded` (skipping `start`).
+   */
+  async decideReview(
+    id: string,
+    tenantId: string,
+    actor: Actor,
+    dto: ReviewDecisionDto,
+    vertical: string | null,
+  ): Promise<Document> {
+    const document = await this.documentRepo.findOne({
+      where: { id, tenantId },
+    });
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    await this.checkAccess(document, actor, 'write');
+
+    if (dto.decision === 'reject') {
+      const { pack, section } = await this.packs.sectionWithPack<{
+        documentReview?: { rejectionReasons?: Array<{ key: string; label: string }> };
+      }>(vertical, 'compliance');
+      const reasons = section?.documentReview?.rejectionReasons ?? [];
+      const validKeys: string[] = Array.isArray(reasons)
+        ? reasons.map((r) => r.key)
+        : [];
+
+      if (!dto.rejectionReasonKey || !validKeys.includes(dto.rejectionReasonKey)) {
+        throw new BadRequestException({
+          code: MeruErrorCode.VALIDATION_INVALID_ENUM_VALUE,
+          message:
+            `rejectionReasonKey must be one of [${validKeys.join(', ')}] from ` +
+            `${pack ? `${pack.code}@${pack.version}` : 'the pack'}'s ` +
+            `compliance.documentReview.rejectionReasons[]; got ` +
+            `${JSON.stringify(dto.rejectionReasonKey ?? null)}.`,
+        });
+      }
+    }
+
+    // Captured before mutation: the history entry describes the transition
+    // being committed, same discipline `crm.service.ts`'s
+    // `assertNoLockedFieldChanged` uses for its own before/after comparison.
+    const before = { reviewStatus: document.reviewStatus };
+    const now = new Date();
+
+    const newStatus: DocumentReviewHistoryEntry['status'] =
+      dto.decision === 'approve' ? 'approved' : 'rejected';
+
+    document.reviewStatus = newStatus;
+    document.reviewedById = actor.id;
+    document.reviewedAt = now;
+    if (dto.decision === 'approve') {
+      // An approved document must not carry a stale rejection reason from a
+      // prior decision.
+      document.rejectionReasonKey = null;
+      document.rejectionReasonNote = null;
+    } else {
+      document.rejectionReasonKey = dto.rejectionReasonKey!;
+      document.rejectionReasonNote = dto.rejectionReasonNote ?? null;
+    }
+
+    const entry: DocumentReviewHistoryEntry = {
+      status: newStatus,
+      byId: actor.id,
+      at: now.toISOString(),
+      versionNumber: document.versionNumber,
+      ...(newStatus === 'rejected'
+        ? {
+            rejectionReasonKey: document.rejectionReasonKey!,
+            ...(document.rejectionReasonNote
+              ? { rejectionReasonNote: document.rejectionReasonNote }
+              : {}),
+          }
+        : {}),
+    };
+    document.reviewHistory = [...(document.reviewHistory ?? []), entry];
+
+    const saved = await this.documentRepo.save(document);
+
+    await this.auditService.logUpdate(
+      tenantId,
+      actor.id,
+      'document',
+      document.id,
+      before,
+      { reviewStatus: saved.reviewStatus, rejectionReasonKey: saved.rejectionReasonKey ?? null },
+      { linkedEntityId: document.linkedEntityId, versionNumber: document.versionNumber },
+    );
+
+    return saved;
   }
 
   /**

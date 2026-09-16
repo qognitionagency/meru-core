@@ -47,6 +47,7 @@ import { AddLeadIntake1757000000000 } from '../migrations/1757000000000-AddLeadI
 import { AddUserPractitionerCredential1756920000000 } from '../migrations/1756920000000-AddUserPractitionerCredential';
 import { AddIamAuditActions1757100000000 } from '../migrations/1757100000000-AddIamAuditActions';
 import { AddJobRunScope1757200000000 } from '../migrations/1757200000000-AddJobRunScope';
+import { AddDocumentReviewStatus1757300000000 } from '../migrations/1757300000000-AddDocumentReviewStatus';
 
 /**
  * Every migration, bundled. The Vercel serverless bundle cannot glob the
@@ -136,4 +137,8 @@ export const ALL_MIGRATIONS = [
   // 1757100000000 — that slot was already taken by AddIamAuditActions above
   // by the time this landed.
   AddJobRunScope1757200000000,
+  // ADR 0025 — the document review sub-state machine (E19). Registered in
+  // the same commit as the migration file, per this array's own standing
+  // instruction.
+  AddDocumentReviewStatus1757300000000,
 ];

@@ -33,7 +33,16 @@ export interface ChecklistItem {
   extraction: { enabled: boolean; fields: string[] } | null;
   /** Null when the request did not name an entity — "not asked", not "missing". */
   uploaded: boolean | null;
-  documents: Array<{ id: string; name: string; status: string; uploadedAt: Date }>;
+  documents: Array<{
+    id: string;
+    name: string;
+    status: string;
+    uploadedAt: Date;
+    /** ADR 0025 — the review sub-state, independent of `status` above. */
+    reviewStatus: 'uploaded' | 'under_review' | 'approved' | 'rejected';
+    rejectionReasonKey: string | null;
+    rejectionReasonNote: string | null;
+  }>;
 }
 
 /**
@@ -204,6 +213,9 @@ export class DocumentChecklistService {
           name: d.name,
           status: String(d.status),
           uploadedAt: d.createdAt,
+          reviewStatus: d.reviewStatus,
+          rejectionReasonKey: d.rejectionReasonKey,
+          rejectionReasonNote: d.rejectionReasonNote,
         })),
       };
     });

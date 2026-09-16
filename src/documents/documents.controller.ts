@@ -37,6 +37,7 @@ import { RequestDocumentUploadUrlDto } from './dto/request-upload-url.dto';
 import { RequestChecklistDocumentsDto } from './dto/request-checklist-documents.dto';
 import { SearchDocumentsDto } from './dto/search-documents.dto';
 import { ChecklistResponseDto } from './dto/checklist-response.dto';
+import { ReviewDecisionDto } from './dto/review-decision.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { PolicyGuard } from '../iam/guards/policy.guard';
 import { Roles } from '../iam/decorators/roles.decorator';
@@ -261,6 +262,66 @@ export class DocumentsController {
       entityId: dto.entityId,
       templateKey: dto.templateKey,
     });
+  }
+
+  @Post(':id/review/start')
+  // Staff-only. Never reachable by a client — the second, service-layer
+  // `DocumentAccessService.assert(..., 'write')` check inside the service is
+  // belt-and-braces against a staff member from another tenant, per the
+  // standing rule (CLAUDE.md §8): a route guard alone has been wrong before.
+  @Roles(PlatformRole.FIRM_ADMIN, PlatformRole.STAFF)
+  @ApiOperation({
+    summary: 'Mark a document under review (uploaded → under_review)',
+    description:
+      'A courtesy state, not a required gate — POST .../decision may be ' +
+      'called directly from `uploaded`, skipping this. No-op (200) if ' +
+      'already under_review.',
+  })
+  @ApiResponse({ status: 200, description: 'Document now under_review (or unchanged)' })
+  @ApiResponse({ status: 404, description: 'Document not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Document is already approved or rejected',
+  })
+  async startReview(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.startReview(id, req.user.tenantId, req.user);
+  }
+
+  @Post(':id/review/decision')
+  @Roles(PlatformRole.FIRM_ADMIN, PlatformRole.STAFF)
+  @ApiOperation({
+    summary: 'Approve or reject a document (ADR 0025)',
+    description:
+      "Any reviewStatus except the target itself may move to 'approved' or " +
+      "'rejected', including re-deciding an already-decided document and " +
+      "deciding directly from 'uploaded'. Rejecting requires " +
+      'rejectionReasonKey, validated against the tenant\'s resolved ' +
+      'compliance.documentReview.rejectionReasons[]. Approving clears any ' +
+      'prior rejection reason.',
+  })
+  @ApiResponse({ status: 200, description: 'Decision recorded' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'decision === "reject" with no rejectionReasonKey, or a key not in ' +
+      "this tenant's pack — MER-VAL-0006",
+  })
+  @ApiResponse({ status: 404, description: 'Document not found' })
+  async decideReview(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReviewDecisionDto,
+    @Request() req: AuthenticatedRequest & { tenantVertical?: string | null },
+  ) {
+    return this.documentsService.decideReview(
+      id,
+      req.user.tenantId,
+      req.user,
+      dto,
+      req.tenantVertical ?? null,
+    );
   }
 
   @Get('templates')

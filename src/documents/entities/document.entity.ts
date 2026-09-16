@@ -35,6 +35,35 @@ export enum DocumentType {
   TXT = 'txt',
 }
 
+/**
+ * ADR 0025 — orthogonal to {@link DocumentStatus}. `DocumentStatus` answers
+ * "does this object still exist" (storage lifecycle); this answers "has
+ * anyone looked at it and what did they decide". A `rejected` document is
+ * still `status: active` — it exists, it is simply not accepted.
+ *
+ * A `varchar` + `CHECK` column, not a TypeORM `enum` — see the migration's
+ * comment. Not a real TypeScript enum for the same reason: a Postgres
+ * `ENUM` type cannot gain or lose a value without a migration that breaks
+ * this repo's usual deploy discipline, so this is deliberately a plain
+ * string-literal union.
+ */
+export type DocumentReviewStatus =
+  | 'uploaded'
+  | 'under_review'
+  | 'approved'
+  | 'rejected';
+
+/** One entry in `Document.reviewHistory` — append-only, never edited. */
+export interface DocumentReviewHistoryEntry {
+  status: 'under_review' | 'approved' | 'rejected';
+  byId: string;
+  at: string; // ISO-8601
+  /** Which `DocumentVersion` this decision applied to. */
+  versionNumber: number;
+  rejectionReasonKey?: string;
+  rejectionReasonNote?: string;
+}
+
 @Entity('documents')
 @Index(['tenantId', 'status'])
 @Index(['tenantId', 'linkedEntityType', 'linkedEntityId'])
@@ -120,6 +149,34 @@ export class Document {
       share: string[];
     };
   };
+
+  // ADR 0025 — review sub-state, orthogonal to `status` above. Default
+  // `'uploaded'` is deliberate: every document that existed before this
+  // migration reads as "nobody has reviewed this yet", which is honest —
+  // rendering a default of `approved` would be the §5.2 failure (unknown
+  // reported as a positive).
+  @Column({ type: 'varchar', length: 20, default: 'uploaded' })
+  reviewStatus: DocumentReviewStatus;
+
+  @Column({ type: 'uuid', nullable: true })
+  reviewedById: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewedAt: Date | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  rejectionReasonKey: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  rejectionReasonNote: string | null;
+
+  // No `ManyToOne` on `reviewedById`, deliberately — matches every other
+  // actor-id-inside-a-jsonb-history field in this codebase
+  // (`WorkflowInstance.history[].triggeredBy`, `AlertFiring`) rather than the
+  // relational `uploadedById` pattern on this same table: it is written from
+  // `actor.id` at decision time and never joined in a hot path.
+  @Column({ type: 'jsonb', default: [] })
+  reviewHistory: DocumentReviewHistoryEntry[];
 
   @Column({ type: 'int', default: 1 })
   versionNumber: number;

@@ -2,7 +2,7 @@
   "code": "immigration",
   "name": "Immigration Practice Management",
   "description": "Shared immigration vocabulary — every country overlay inherits this.",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "vertical": "immigration",
   "locales": [
     "en"
@@ -776,7 +776,18 @@
         "deadline": "within_5_days",
         "regulatorId": "au-home-affairs"
       }
-    ]
+    ],
+    "documentReview": {
+      "rejectionReasons": [
+        { "key": "illegible", "label": "Illegible or low quality" },
+        { "key": "expired", "label": "Document has expired" },
+        { "key": "wrong_document", "label": "Wrong document type for this checklist item" },
+        { "key": "name_mismatch", "label": "Name does not match the applicant's profile" },
+        { "key": "incomplete", "label": "Incomplete — pages or fields missing" },
+        { "key": "not_certified", "label": "Copy is not certified where certification is required" },
+        { "key": "other", "label": "Other — see note" }
+      ]
+    }
   },
   "kpis": [
     {

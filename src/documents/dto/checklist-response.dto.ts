@@ -15,6 +15,18 @@ export class ChecklistDocumentDto {
   @ApiProperty() name!: string;
   @ApiProperty() status!: string;
   @ApiProperty({ type: String, format: 'date-time' }) uploadedAt!: Date;
+
+  @ApiProperty({
+    enum: ['uploaded', 'under_review', 'approved', 'rejected'],
+    description: 'ADR 0025 — independent of `status`, which is storage lifecycle only.',
+  })
+  reviewStatus!: 'uploaded' | 'under_review' | 'approved' | 'rejected';
+
+  @ApiProperty({ type: String, nullable: true })
+  rejectionReasonKey!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  rejectionReasonNote!: string | null;
 }
 
 export class ChecklistExtractionDto {

@@ -305,6 +305,21 @@ const ComplianceRulesSchema = z.object({
     deadline: z.string(),
     regulatorId: z.string(),
   })).optional(),
+  /**
+   * ADR 0025 — one shared rejection-reason vocabulary for staff reviewing an
+   * uploaded document, not one list per `documentTypes[]` entry (authoring
+   * burden without a demonstrated need; see the ADR §10 trigger to revisit).
+   * `compliance` is already persisted wholesale by the loader's key list, so
+   * this is a two-part commit (this schema change + `npm run packs:schema`),
+   * not the three-part rule CLAUDE.md §4.2 warns about for a genuinely new
+   * top-level array.
+   */
+  documentReview: z.object({
+    rejectionReasons: z.array(z.object({
+      key: z.string().min(1),
+      label: z.string().min(1),
+    })),
+  }).optional(),
 });
 
 // ── AI prompt library ─────────────────────────────────────────────────────

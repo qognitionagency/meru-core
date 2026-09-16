@@ -78,6 +78,8 @@ describe('DocumentsService — presigned upload path', () => {
       // Checklist bookkeeping after a document lands — no payload here links
       // to an entity, so it is never reached.
       { recordIntake: jest.fn() } as any,
+      {} as any, // packs — only decideReview() reads this
+      {} as any, // auditService — only decideReview() writes this
     );
 
     return { service, storage, documentRepo, versionRepo, savedDocuments, savedVersions };

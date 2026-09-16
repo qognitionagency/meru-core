@@ -150,8 +150,21 @@ describe('missing-document chase (immigration pack)', () => {
       new RuleEvaluatorService(),
       {
         section: jest.fn(() => Promise.resolve({ sequences: [chase] })),
+        // No `clientPortalUrl` in this fixture's pack — `portalUrlFor` must
+        // degrade to `null`, not throw, so `welcome_client`-shaped sends stay
+        // untouched by this fixture's `document_request` focus.
+        forVertical: jest.fn(() => Promise.resolve({ uiConfig: {} })),
       } as never,
       {
+        // `send()` now renders first and refuses to dispatch anything left
+        // unresolved — every variable `document_chase_reminder` declares is
+        // one `variablesFor` actually supplies (the "supplies every variable
+        // the reminder declares" test below is the guard on that), so this
+        // fixture's `renderTemplate` reports nothing unresolved, matching
+        // what the real template would do.
+        renderTemplate: jest.fn(() =>
+          Promise.resolve({ subject: 's', content: 'c', unrendered: [] }),
+        ),
         sendFromTemplate: jest.fn((...args: unknown[]) => {
           sent.push({
             templateKey: args[1],
@@ -229,7 +242,7 @@ describe('missing-document chase (immigration pack)', () => {
     // The template greets on behalf of the firm, not the platform.
     expect(sent[0].variables.firmName).toBe('Harbourline Migration');
     expect(sent[0].variables.firstName).toBe('Ada');
-    expect(second.unrenderedVariables).toEqual([]);
+    expect(second.refused).toEqual([]);
   });
 
   it('stops the moment the documents are in', async () => {

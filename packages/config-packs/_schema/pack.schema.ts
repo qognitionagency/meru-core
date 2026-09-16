@@ -945,6 +945,23 @@ export const ConfigPackSchema = z.object({
      * it succeed.
      */
     clientDocumentUploadUrl: HttpUrl.optional(),
+    /**
+     * Where a client signs in to their portal — the `{{portalUrl}}` in the
+     * `welcome_client` template.
+     *
+     * Same contract as `clientDocumentUploadUrl` immediately above: a
+     * **complete absolute URL**, authored by the pack, never assembled by
+     * core. Core has no business knowing the vertical UI's login path (§7.1),
+     * and `SequenceRunnerService.variablesFor`'s caller supplies it verbatim —
+     * one key, one string, no templating.
+     *
+     * Optional, and its absence is safe rather than silent: `renderTemplate`
+     * leaves `{{portalUrl}}` in place when nothing supplies it, and the
+     * sequence runner and the `/messaging/templates/:key/preview` route both
+     * report the resulting `unrendered` variable rather than sending a client
+     * a literal placeholder. A pack that omits this key keeps that behaviour.
+     */
+    clientPortalUrl: HttpUrl.optional(),
   }).optional(),
   /**
    * Pack provenance and, critically, its unresolved caveats.

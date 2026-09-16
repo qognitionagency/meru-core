@@ -198,6 +198,13 @@ export class MessagingController {
         tenant ?? { name: '' },
         entity,
       );
+      // Same variable a send would supply (`SequenceRunnerService.send`) —
+      // this route's whole point is showing exactly what a send would
+      // render, so it must not omit one the runner would have filled.
+      const portalUrl = await this.sequences.portalUrlFor(
+        req.tenantVertical ?? null,
+      );
+      if (portalUrl) variables.portalUrl = portalUrl;
     }
     variables = { ...variables, ...(dto.variables ?? {}) };
 

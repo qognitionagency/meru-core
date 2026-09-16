@@ -1626,6 +1626,10 @@
         "clientDocumentUploadUrl": {
           "type": "string",
           "format": "uri"
+        },
+        "clientPortalUrl": {
+          "type": "string",
+          "format": "uri"
         }
       }
     },

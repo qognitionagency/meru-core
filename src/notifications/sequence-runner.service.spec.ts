@@ -52,6 +52,10 @@ describe('SequenceRunnerService', () => {
     opts: {
       entities?: Record<string, unknown>[];
       sequences?: SequenceDefinition[];
+      /** `forVertical`'s resolved pack — defaults to one with no `uiConfig` keys set. */
+      pack?: { uiConfig?: Record<string, unknown> } | null;
+      /** `renderTemplate`'s `unrendered` list — defaults to fully resolved. */
+      unrendered?: string[];
     } = {},
   ) {
     const enrolments: SequenceEnrolment[] = [];
@@ -88,9 +92,21 @@ describe('SequenceRunnerService', () => {
       section: jest.fn(() =>
         Promise.resolve({ sequences: opts.sequences ?? [sequence] }),
       ),
+      forVertical: jest.fn(() =>
+        Promise.resolve(
+          opts.pack === undefined ? { uiConfig: {} } : opts.pack,
+        ),
+      ),
     };
 
     const notifications = {
+      renderTemplate: jest.fn(() =>
+        Promise.resolve({
+          subject: 's',
+          content: 'c',
+          unrendered: opts.unrendered ?? [],
+        }),
+      ),
       sendFromTemplate: jest.fn((...args: unknown[]) => {
         sent.push({
           templateKey: args[1],
@@ -111,7 +127,7 @@ describe('SequenceRunnerService', () => {
       notifications as never,
     );
 
-    return { service, enrolments, sent };
+    return { service, enrolments, sent, notifications };
   }
 
   const at = (day: number, hour = 9) =>
@@ -258,6 +274,76 @@ describe('SequenceRunnerService', () => {
       'document_request',
       'document_request',
     ]);
+  });
+
+  it('supplies portalUrl from the pack when uiConfig.clientPortalUrl is set', async () => {
+    const { service, sent } = build({
+      sequences: [
+        { ...sequence, steps: [{ templateKey: 'welcome_client', afterHours: 0 }] },
+      ],
+      pack: { uiConfig: { clientPortalUrl: 'https://app.immistack.com/client/home' } },
+    });
+
+    await service.run(at(10));
+
+    expect(sent).toHaveLength(1);
+    expect((sent[0].variables as Record<string, unknown>).portalUrl).toBe(
+      'https://app.immistack.com/client/home',
+    );
+  });
+
+  it('leaves portalUrl unset when the pack declares no clientPortalUrl', async () => {
+    const { service, sent } = build({
+      sequences: [
+        { ...sequence, steps: [{ templateKey: 'welcome_client', afterHours: 0 }] },
+      ],
+      pack: { uiConfig: {} },
+    });
+
+    await service.run(at(10));
+
+    // Absent, not blank and not the literal string "undefined" — both of
+    // which would pass renderTemplate's `String(value)` substitution and
+    // reach a client as a broken sentence rather than a reported gap.
+    expect(sent).toHaveLength(1);
+    expect(
+      Object.prototype.hasOwnProperty.call(sent[0].variables, 'portalUrl'),
+    ).toBe(false);
+  });
+
+  it('REFUSES to dispatch when the rendered template still has an unresolved variable', async () => {
+    const { service, sent, notifications } = build({
+      unrendered: ['contactEmail'],
+    });
+
+    const summary = await service.run(at(10));
+
+    // Not sent — this is the whole point of the fix. `send()` used to call
+    // `sendFromTemplate` unconditionally and only inspect the result
+    // afterwards; a refusal now happens before any dispatch call at all.
+    expect(notifications.sendFromTemplate).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+    expect(summary.sent).toBe(0);
+    expect(summary.refused).toEqual([
+      {
+        sequenceKey: 'chase_docs',
+        templateKey: 'document_request',
+        entityId: '22222222-2222-2222-2222-222222222222',
+        variables: ['contactEmail'],
+      },
+    ]);
+  });
+
+  it('a refused step still counts as attempted, so it is not retried forever', async () => {
+    const { service, enrolments } = build({ unrendered: ['contactEmail'] });
+
+    await service.run(at(10));
+
+    // Same behaviour a hard send failure already had: `stepsSent` still
+    // advances. An unresolvable template must not stall the sequence, and
+    // the refusal is reported once per attempt via `summary.refused` (and a
+    // WARN log), not retried sweep after sweep.
+    expect(enrolments[0].stepsSent).toBe(1);
   });
 
   it('refuses a sequence whose stop condition cannot compile', async () => {

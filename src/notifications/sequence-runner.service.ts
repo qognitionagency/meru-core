@@ -32,14 +32,20 @@ export interface SequenceRunSummary {
   sent: number;
   stopped: number;
   /**
-   * Messages that went out with `{{placeholders}}` still in them, and which
-   * ones. A pack authoring error rather than a code fault — the template
-   * declares a variable the runner has no way to supply — but it reaches a
-   * client, so it is reported rather than logged and forgotten.
+   * A step that was NOT sent because its rendered subject/body still
+   * declared a variable neither the sequence runner nor the pack could
+   * supply — CLAUDE.md §5.2's `documentTemplates[].requires` reasoning
+   * applied to outbound messaging: a client must never receive a literal
+   * `{{portalUrl}}` in their inbox. A pack authoring error rather than a
+   * code fault, but the refusal is what keeps it from becoming a client's
+   * problem too. The step still counts as attempted (`sendDueSteps` always
+   * advances `stepsSent`) so a permanently-unresolvable template cannot loop
+   * a sequence forever — it is reported here instead, once per attempt.
    */
-  unrenderedVariables: Array<{
+  refused: Array<{
     sequenceKey: string;
     templateKey: string;
+    entityId: string;
     variables: string[];
   }>;
   invalidSequences: Array<{
@@ -90,7 +96,7 @@ export class SequenceRunnerService {
       enrolled: 0,
       sent: 0,
       stopped: 0,
-      unrenderedVariables: [],
+      refused: [],
       invalidSequences: [],
     };
 
@@ -347,8 +353,58 @@ export class SequenceRunnerService {
     const attrs = entity.verticalAttributes ?? {};
     const variables = SequenceRunnerService.variablesFor(tenant, entity);
 
+    // `welcome_client` declares `{{portalUrl}}` and nothing supplied it —
+    // the same defect class `uploadUrl` was (`document-request.service.ts`).
+    // Set CONDITIONALLY, never to a placeholder: `renderTemplate` does
+    // `String(value)`, so an empty or undefined value would render as `''`
+    // or the literal text "undefined" and pass the unrendered-variable check
+    // — a client reading "Sign in: undefined" in the first email their firm
+    // sends them. Absent, the placeholder survives and the refusal below
+    // reports it by name in `summary.refused` instead.
+    const portalUrl = await this.portalUrlFor(tenant.vertical);
+    if (portalUrl) variables.portalUrl = portalUrl;
+
     try {
-      const notification = await this.notifications.sendFromTemplate(
+      // Render FIRST and refuse to dispatch a template this sweep cannot
+      // fully fill — the same discipline `DocumentRequestService.
+      // sendRequestTemplate` already uses, and CLAUDE.md §5.2's
+      // `documentTemplates[].requires` reasoning applied here: a client must
+      // never receive a literal `{{portalUrl}}` in their inbox. This used to
+      // dispatch first and only inspect the rendered text for leftover
+      // placeholders afterwards — by then the client already had it.
+      //
+      // Vertical-neutral, deliberately: a GRC tenant's `welcome_client` (same
+      // unfilled `{{portalUrl}}`, no `clientPortalUrl` authored into
+      // `grc.json`) is refused exactly the same way an ImmiStack tenant's
+      // would be if its pack similarly lacked a variable. Nothing here knows
+      // or cares which vertical it is.
+      const rendered = await this.notifications.renderTemplate(
+        tenant.id,
+        step.templateKey,
+        variables,
+        tenant.vertical,
+      );
+
+      if (rendered.unrendered.length) {
+        summary.refused.push({
+          sequenceKey: sequence.key,
+          templateKey: step.templateKey,
+          entityId: entity.id,
+          variables: rendered.unrendered,
+        });
+        // Variable NAMES only — never the rendered subject/body and never a
+        // recipient address. The names are pack vocabulary (`portalUrl`,
+        // `contactName`), not this record's data.
+        this.logger.warn(
+          `Sequence '${sequence.key}' refused to send template ` +
+            `'${step.templateKey}': unresolved variable(s) ` +
+            `${rendered.unrendered.join(', ')} — the template declares ` +
+            `variable(s) this sweep cannot supply.`,
+        );
+        return false;
+      }
+
+      await this.notifications.sendFromTemplate(
         tenant.id,
         step.templateKey,
         // The recipient is a CRM record, not a platform user, so its id goes
@@ -368,25 +424,6 @@ export class SequenceRunnerService {
           },
         },
       );
-
-      // Rendering leaves an unknown `{{placeholder}}` in place. That is the
-      // right behaviour for the renderer — dropping it silently would hide the
-      // gap — but it means a client can receive literal `{{uploadUrl}}`. The
-      // sequence cannot know every variable a template wants, so the mismatch
-      // is surfaced here instead of discovered by a recipient.
-      const unresolved = this.unresolvedIn(notification?.content, notification?.subject);
-      if (unresolved.length) {
-        summary.unrenderedVariables.push({
-          sequenceKey: sequence.key,
-          templateKey: step.templateKey,
-          variables: unresolved,
-        });
-        this.logger.error(
-          `Sequence '${sequence.key}' sent template '${step.templateKey}' with ` +
-            `unrendered variables: ${unresolved.join(', ')} — the template ` +
-            `declares variables the sequence runner cannot supply.`,
-        );
-      }
 
       return true;
     } catch (err) {
@@ -425,6 +462,36 @@ export class SequenceRunnerService {
       entityType: entity.type,
       dueDate: entity.dueDate?.toISOString() ?? '',
     };
+  }
+
+  /**
+   * Where a client signs in to their portal, read from the pack.
+   *
+   * Same reasoning as `DocumentRequestService.uploadUrlFor`
+   * (`src/documents/document-request.service.ts`), which this deliberately
+   * mirrors: core does not know the vertical UI's login path — hardcoding it,
+   * or holding a base URL and appending one, is the 80/20 rule in reverse
+   * (CLAUDE.md §7.1). The pack authors the whole absolute URL; this reads it
+   * and passes it through unmodified.
+   *
+   * `null` when the pack declares none — a real state, not a bug. A GRC
+   * tenant's `welcome_client` template keeps today's behaviour (unrendered
+   * `portalUrl`, reported by the caller) until GovernanceX's own portal URL
+   * is authored into `grc.json`'s `uiConfig`, which is a pack-authoring
+   * change, not a code change, and out of scope here.
+   *
+   * Public so `MessagingController`'s preview route can render exactly what
+   * a send would, the same guarantee `variablesFor` above documents.
+   */
+  async portalUrlFor(vertical: string | null): Promise<string | null> {
+    // Tenant scope: `forVertical` reads the ambient `TenantContext` tenant to
+    // honour a config pin and otherwise serves the vertical's base pack. No
+    // tenant data is read here — a config pack is platform-global — so there
+    // is nothing for RLS to confine and nothing that could cross a tenant.
+    const pack = await this.packs.forVertical(vertical);
+    const url = (pack?.uiConfig as Record<string, unknown> | undefined)
+      ?.clientPortalUrl;
+    return typeof url === 'string' && url.trim() ? url : null;
   }
 
   /** The pack's `messaging.sequences[]` for a vertical — what a UI lists. */
@@ -546,16 +613,6 @@ export class SequenceRunnerService {
     enrolment.stoppedAt = now;
     enrolment.stopReason = 'manual';
     return this.enrolmentRepo.save(enrolment);
-  }
-
-  /** `{{placeholders}}` still present after rendering, deduplicated. */
-  private unresolvedIn(...parts: Array<string | undefined>): string[] {
-    const found = new Set<string>();
-    for (const part of parts) {
-      if (!part) continue;
-      for (const match of part.matchAll(/{{(\w+)}}/g)) found.add(match[1]);
-    }
-    return [...found];
   }
 
   /** Active enrolments for a tenant — what a sequences page renders. */

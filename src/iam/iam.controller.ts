@@ -324,6 +324,10 @@ export class IamController {
   @ApiQuery({ name: 'tenantSlug', required: true, example: 'acme-banking' })
   @ApiResponse({ status: 302, description: 'Redirect to IdP' })
   @ApiResponse({ status: 400, description: 'Tenant not configured for SAML' })
+  @ApiResponse({
+    status: 501,
+    description: 'SAML SSO is disabled pending a library-backed implementation',
+  })
   async samlInitiate(
     @Query('tenantSlug') tenantSlug: string,
     @Res() res: Response,
@@ -359,6 +363,10 @@ export class IamController {
     description: 'SAML login successful — JWT returned',
   })
   @ApiResponse({ status: 401, description: 'Invalid SAML assertion' })
+  @ApiResponse({
+    status: 501,
+    description: 'SAML SSO is disabled pending a library-backed implementation',
+  })
   async samlCallback(@Body() dto: SamlCallbackDto) {
     return this.samlService.handleCallback(
       dto.SAMLResponse,

@@ -3,6 +3,7 @@ import {
   Logger,
   UnauthorizedException,
   BadRequestException,
+  NotImplementedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -63,9 +64,35 @@ export class SamlService {
       'https://api.meru.com/api/v1/auth/saml/callback';
   }
 
+  /**
+   * SAML SSO is DISABLED, unconditionally. The code below is kept, not
+   * deleted, so the rebuild has the flow to work from — but it must not run.
+   *
+   * Confirmed unsound (Anton, security review): `verifySignature` never binds
+   * a Reference/DigestValue to the assertion and does no canonicalisation, so
+   * a validly signed SignedInfo replayed beside a forged assertion passes (XML
+   * signature wrapping); InResponseTo/StatusCode/Audience are regex-read
+   * element text a forged document supplies; locked users get tokens; and the
+   * token it signs has no `sid`, which JwtStrategy now refuses anyway.
+   *
+   * There is deliberately no SAML_ENABLED flag — a flag would re-enable this
+   * verifier. Re-enable only on `@node-saml/node-saml` with
+   * wantAssertionsSigned, a required Audience, InResponseTo from the
+   * attribute, pending state persisted (not this in-process Map), a user
+   * status check, and tokens issued through `IamService.issueSession`.
+   * Spec: `src/iam/saml-disabled.spec.ts`.
+   */
+  private assertSamlAvailable(): void {
+    throw new NotImplementedException(
+      'SAML SSO is disabled pending a library-backed implementation',
+    );
+  }
+
   // ── SP-initiated SSO: generate AuthnRequest redirect URL ─────────────────
 
   async initiateLogin(tenantSlug: string): Promise<SamlAuthnRequestResult> {
+    this.assertSamlAvailable();
+
     const tenant = await this.tenantRepo.findOne({
       where: { slug: tenantSlug },
     });
@@ -118,6 +145,8 @@ export class SamlService {
     samlResponseB64: string,
     relayState: string,
   ): Promise<SamlLoginResult> {
+    this.assertSamlAvailable();
+
     const xml = Buffer.from(samlResponseB64, 'base64').toString('utf8');
 
     const inResponseTo = this.extractXmlValue(xml, 'InResponseTo') ?? '';
@@ -146,14 +175,15 @@ export class SamlService {
       );
     }
 
-    // Verify signature if tenant has a certificate configured
-    if (tenant.ssoConfig?.cert) {
-      this.verifySignature(xml, tenant.ssoConfig.cert);
-    } else {
-      this.logger.warn(
-        `SAML signature not verified for tenant ${tenant.id} — no cert configured`,
+    // Verify signature. No certificate means nothing can be verified, and an
+    // unsigned assertion is an attacker-written login: fail closed, so this
+    // stays shut even if the 501 above is ever removed.
+    if (!tenant.ssoConfig?.cert) {
+      throw new UnauthorizedException(
+        'SAML signature verification is required',
       );
     }
+    this.verifySignature(xml, tenant.ssoConfig.cert);
 
     // Verify audience / issuer
     const audience = this.extractXmlValue(xml, 'Audience');

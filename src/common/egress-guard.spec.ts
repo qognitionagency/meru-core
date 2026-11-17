@@ -95,14 +95,35 @@ describe('egress guard', () => {
   });
 
   describe('egressGuardedFetch', () => {
-    const realFetch = global.fetch;
+    // It dials through `https.request` (with `guardedLookup`) now, not the
+    // global `fetch`; stub the request so nothing here touches the network.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const httpsModule = require('https');
     let fetchMock: jest.Mock;
+    let requestSpy: jest.SpyInstance;
     beforeEach(() => {
-      fetchMock = jest.fn(async () => new Response('ok'));
-      (global as any).fetch = fetchMock;
+      fetchMock = jest.fn();
+      requestSpy = jest
+        .spyOn(httpsModule, 'request')
+        .mockImplementation((opts: any, cb: any) => {
+          fetchMock(opts);
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { PassThrough } = require('stream');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { EventEmitter } = require('events');
+          const req: any = new EventEmitter();
+          req.end = () => {
+            const res: any = new PassThrough();
+            res.statusCode = 200;
+            res.headers = {};
+            cb(res);
+            res.end('ok');
+          };
+          return req;
+        });
     });
     afterEach(() => {
-      (global as any).fetch = realFetch;
+      requestSpy.mockRestore();
     });
 
     it('re-resolves on every request and refuses a host that now points inward', async () => {
@@ -115,13 +136,13 @@ describe('egress guard', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it('never follows a redirect — a public host cannot bounce the request inward', async () => {
+    it('makes exactly one request, whatever redirect mode is asked for', async () => {
+      // The 3xx case itself is pinned in egress-guarded-fetch.spec.ts.
       await egressGuardedFetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         redirect: 'follow',
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: 'error' });
     });
 
     it('accepts a Request object as the target', async () => {

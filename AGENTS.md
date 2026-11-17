@@ -1375,6 +1375,10 @@ branch is not a change the portals can see (`/api-json` is the check).
      public http(s) (loopback, link-local/metadata, RFC1918, CGNAT, private
      IPv6, or a host resolving to one) is **400** (Anton #4). Firm admins still
      connect OpenAI, Anthropic and DeepSeek with a key alone.
-     **Product consequence, needs an operator decision:** a self-hosted model on
-     a private network (`custom-openai-compatible` → `http://vllm.internal`)
-     can no longer be configured at all.
+     **Product consequence, needs an operator decision:** no customer tenant can now be given any `baseUrl` — `custom-openai-compatible` (Azure OpenAI, OpenRouter, Together, self-hosted) is unconfigurable for every customer tenant, because a platform_admin writes only its own tenant's connector and an impersonation token never carries platform_admin. Private-network endpoints are refused outright.
+     **Owen's gate follow-up (w1-08), not deployed:** the guard also refuses
+     IPv4-compatible `::/96`, Teredo `2001::/32`, 6to4 `2002::/16`, local-use
+     NAT64 `64:ff9b:1::/48` and site-local `fec0::/10`, and the AI connector
+     now dials through `http(s).request` with `guardedLookup`, so the address
+     connected to is the one checked (the DNS-rebinding window is closed; no
+     new dependency). A 3xx from the provider is refused, not followed.

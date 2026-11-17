@@ -1,6 +1,9 @@
 import * as dnsModule from 'node:dns';
 import { promises as dns } from 'node:dns';
+import * as http from 'node:http';
+import * as https from 'node:https';
 import { BlockList, isIP } from 'node:net';
+import { Readable } from 'node:stream';
 
 /**
  * Outbound HTTP to a URL that a tenant, a pack or a request chose.
@@ -16,14 +19,13 @@ import { BlockList, isIP } from 'node:net';
  * equivalents; every IPv4-mapped and NAT64 IPv6 address; and a hostname whose
  * DNS lookup fails. If ANY resolved address is refused, the URL is refused.
  *
- * What it does not do, yet: pin the connection to the address it checked.
- * `egressGuardedFetch` re-resolves immediately before each request and never
- * follows a redirect, which closes the redirect bounce and a stale answer,
- * but `fetch` performs its own lookup afterwards, so a DNS server answering
- * with a zero TTL can still swap the address in between. Closing that needs
- * an undici dispatcher whose `connect.lookup` runs this check on the address
- * actually dialled. [UNVERIFIED: whether `undici` can be added as a direct
- * dependency without breaking `check:cjs`.]
+ * The connection is pinned to the address checked: `egressGuardedFetch` and
+ * the workflow webhook both dial through `http(s).request` with
+ * `guardedLookup`, which checks the addresses Node is about to connect to.
+ * The global `fetch` resolved the name again on its own after the check, so
+ * a DNS server answering public first and private second could swap the
+ * address in between (Owen's gate, w1-08); that window is closed. Neither
+ * follows a redirect.
  */
 
 export class EgressRefusedError extends Error {
@@ -66,6 +68,13 @@ for (const [net, prefix] of [
   ['fc00::', 7], // unique-local
   ['fe80::', 10], // link-local
   ['ff00::', 8], // multicast
+  // Owen's gate (w1-08): ranges that embed or route to IPv4, or are
+  // deprecated private space. Each let 169.254.169.254 through as IPv6.
+  ['::', 96], // IPv4-compatible (deprecated)
+  ['2001::', 32], // Teredo
+  ['2002::', 16], // 6to4
+  ['64:ff9b:1::', 48], // local-use NAT64 (RFC 8215)
+  ['fec0::', 10], // site-local (deprecated)
 ] as const) {
   REFUSED_V6.addSubnet(net, prefix, 'ipv6');
 }
@@ -121,27 +130,85 @@ export async function assertEgressAllowed(raw: string): Promise<void> {
 }
 
 /**
- * A `fetch` that checks the target on every call and never follows a
- * redirect. Shaped to drop into the OpenAI SDK's `fetch` option.
+ * A `fetch` that checks the target, dials only the address it checked, and
+ * never follows a redirect. Shaped to drop into the OpenAI SDK's `fetch`
+ * option. Built on `http(s).request` with `lookup: guardedLookup` rather than
+ * the global `fetch`, whose own lookup after the check left a DNS-rebinding
+ * window; no new dependency.
+ *
+ * A 3xx is refused (`EgressRefusedError`) rather than returned, matching the
+ * `redirect: 'error'` this replaced; the caller's `redirect` is ignored.
  */
 export async function egressGuardedFetch(
   input: string | URL | Request,
   init?: RequestInit,
 ): Promise<Response> {
-  const target =
-    typeof input === 'string'
-      ? input
-      : input instanceof URL
-        ? input.href
-        : input.url;
-  await assertEgressAllowed(target);
-  return fetch(input, { ...init, redirect: 'error' });
+  // Normalises every header and body shape the SDK may pass (string, bytes,
+  // URLSearchParams, FormData with its boundary) into one Request.
+  const request = new Request(input, { ...init, redirect: 'manual' });
+  await assertEgressAllowed(request.url);
+
+  const url = new URL(request.url);
+  const body = request.body
+    ? Buffer.from(await request.arrayBuffer())
+    : undefined;
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, name) => {
+    headers[name] = value;
+  });
+  if (body && !headers['content-length']) {
+    headers['content-length'] = String(body.length);
+  }
+
+  const lib = url.protocol === 'https:' ? https : http;
+  return new Promise<Response>((resolve, reject) => {
+    const req = lib.request(
+      {
+        protocol: url.protocol,
+        // IP literals keep their brackets in `hostname`; `request` wants none.
+        // Node skips `lookup` for a literal, which `assertEgressAllowed`
+        // above has already checked.
+        hostname: url.hostname.replace(/^\[|\]$/g, ''),
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        method: request.method,
+        headers,
+        lookup: guardedLookup,
+        signal: init?.signal ?? undefined,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          res.resume();
+          reject(new EgressRefusedError(`redirect (HTTP ${status}) not followed`));
+          return;
+        }
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(res.headers)) {
+          if (value === undefined) continue;
+          for (const v of Array.isArray(value) ? value : [value]) {
+            responseHeaders.append(name, v);
+          }
+        }
+        const noBody = status === 204 || status === 205 || status === 304;
+        if (noBody) res.resume();
+        resolve(
+          new Response(
+            noBody ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>),
+            { status, statusText: res.statusMessage, headers: responseHeaders },
+          ),
+        );
+      },
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 /**
  * A `dns.lookup`-shaped function for `http.request` / `https.request`'s
- * `lookup` option. It checks the addresses Node is about to dial, so unlike
- * `egressGuardedFetch` there is no window between the check and the connect.
+ * `lookup` option. It checks the addresses Node is about to dial, so there
+ * is no window between the check and the connect.
  * Node skips `lookup` for an IP-literal host, so callers must also run
  * `assertEgressAllowed` on the URL first.
  */

@@ -1,55 +1,186 @@
-# Render Blueprint for Meru Core (api.meru.com)
-# Deploys the NestJS backend as a persistent web service (keeps BullMQ
-# workers + @nestjs/schedule cron running, unlike serverless).
+# Render Blueprint — meru-core (NestJS API) + its two scheduler crons.
 #
-# Usage: push to GitHub, then Render Dashboard -> New -> Blueprint -> pick repo.
-# Set the secret env vars (marked sync:false) in the Render dashboard.
+# STATUS (2026-11-17, render CLI v2.19.0, workspace "My Workspace"):
+# `render blueprints validate render.yaml` reports valid:false with exactly
+# three errors, all `need_payment_info`, one per service (every service asks
+# for `plan: starter` and the Render account has no payment method). There are
+# NO schema errors. The operator must add a payment method; see
+# docs/runbooks/render-deploy.md §0b for that and for what a free plan would
+# and would not give. A second gate shows once payment is cleared: validation
+# also checks that the env group `meru-secrets` already exists in the workspace
+# ("env var group linkage depends on non-existent group"). Create the group
+# first (runbook §3). Both facts were observed on scratch copies of this file,
+# not on this file with a payment method attached.
+# Operator steps: docs/runbooks/render-deploy.md
+#
+# WHAT THIS REPLACES: the previous file was a Docker/singapore/autoDeploy
+# blueprint with `generateValue: true` on JWT_SECRET and DOCUMENT_ENCRYPTION_KEY.
+# generateValue mints a NEW random value on first sync. For an encryption key
+# that silently orphans every ciphertext written under the old key, and for
+# JWT_SECRET it invalidates every live session. Neither key appears here with
+# any value, on purpose — they live in the hand-made env group `meru-secrets`.
+#
+# DESIGN
+#   - Persistent web service, not serverless. The Vercel-only behaviour keyed
+#     on `process.env.VERCEL` (the `isServerless` flag in the TypeOrmModule
+#     factory in app.module.ts: DB retries/pool; `onModuleInit` in
+#     queue.processor.ts: processor loop; `initialize` in
+#     vertical-datasources.service.ts) therefore takes its non-serverless branch: 10 DB connect retries and
+#     pool max 10. NEVER copy a VERCEL* variable into this environment — it
+#     would flip those branches back (retries 1, pool 1).
+#   - Scheduling: ONE driver. Render crons below call /api/v1/jobs/tick
+#     (CronSecretGuard). The in-process schedulers are gated by
+#     INTERNAL_SCHEDULER (src/config/configuration.ts, read in
+#     src/app.module.ts and src/queue/queue.processor.ts):
+#       off (default) -> ScheduleModule is not imported, so every @Cron handler
+#                        (task, queue, notifications, sla-watchdog,
+#                        regulatory-radar, billing, analytics services) is
+#                        inert metadata and nothing fires; the queue
+#                        processor loop does not start either.
+#       on            -> both start, and with the crons below every
+#                        minute-level job runs twice; the @Cron handlers also
+#                        run with no tenant bound.
+#     The only accepted values are `on` and `off`; anything else (e.g. `true`)
+#     REFUSES TO BOOT. It is set to "off" explicitly below so a later change of
+#     the code default cannot silently double-run jobs. Expected boot log:
+#     "INTERNAL_SCHEDULER is off - processor loop disabled; /jobs/tick drains
+#     the queue." The ticks run INSIDE the web service process (the cron only
+#     makes the HTTP call), so "Drained n job(s)" lines in the web service log
+#     are normal and are not evidence the loop is on.
+#     [UNVERIFIED: that /jobs/tick covers every job the 8 @Cron handlers did;
+#     the Vercel deployment never ran them either, so this is parity with it.]
+#   - Secrets that gate boot: with NODE_ENV=production the API refuses to start
+#     unless JWT_SECRET, DOCUMENT_ENCRYPTION_KEY and CREDENTIALS_ENCRYPTION_KEY
+#     are set (the DOCUMENT_ENCRYPTION_KEY and CREDENTIALS_ENCRYPTION_KEY
+#     entries of `validationSchema` in src/config/configuration.ts, spec
+#     src/config/boot-guards.spec.ts). The public default-key fallback is gone
+#     in production. CREDENTIALS_ENCRYPTION_KEY must also be >= 32 characters,
+#     and that is ALSO enforced at boot in production (Joi `.min(32)`, the same
+#     floor as core/crypto/credential-cipher.ts `key()`): a shorter value
+#     REFUSES TO BOOT with `length must be at least 32 characters long`. (The
+#     DOCUMENT_ENCRYPTION_KEY has no length floor, only non-empty.) All three
+#     live in `meru-secrets`, not here. A missing or short one means the
+#     process exits, the health check never passes, and Render cancels the
+#     deploy after 15 minutes (render.com/docs/health-checks).
+#   - SAML SSO is hard-disabled in code (501 on /auth/saml/*,
+#     src/iam/services/saml.service.ts). There is NO environment flag for it;
+#     do not add a SAML_* variable here expecting it to do anything.
+#   - Region ohio: the live control-plane Neon database is
+#     ep-small-darkness-aeyx0p5j in us-east-2 (Ohio) (CLAUDE.md §12). Same
+#     region keeps DB latency low. OPEN OPERATOR DECISION (runbook §5): that
+#     project is not in the Neon account currently signed in on the authoring
+#     machine, and the project that is (cool-rice-41190255,
+#     ep-restless-thunder-azgspl7m, ap-southeast-1, Singapore) is the OLD
+#     project. No connection string is touched here, and the vertical DB URLs
+#     still name the old project.
+#   - Node 20, pinned via NODE_VERSION, because the previous Dockerfile used
+#     node:20-alpine. Node 20 reached upstream end-of-life on 2026-04-30, so
+#     this is a pin for continuity, not a recommendation. package.json has no
+#     "engines" field; nothing in the repo has been built under Node 20 on the
+#     authoring machine (Node 25 there). [UNVERIFIED: build + test on Node 20]
+#   - PORT is deliberately NOT set. Render injects PORT (default 10000) and
+#     src/main.ts reads process.env.PORT. The old blueprint's PORT=8000 is gone.
+#   - Install uses --prod=false: with NODE_ENV=production pnpm would skip
+#     devDependencies and `nest build` (@nestjs/cli) would not exist. Same
+#     reason vercel.json has it.
+#   - Migrations are NOT run by this blueprint. See the runbook: they are
+#     applied by hand, before the deploy, with the owner DATABASE_URL.
+#
+# SECRETS / CONFIG: everything not listed under `envVars` below comes from the
+# env group `meru-secrets`, created by hand in the dashboard (Render -> Env
+# Groups). The full NAME list is in docs/runbooks/render-deploy.md §3. The
+# group is referenced, never created, by this file, so a blueprint sync cannot
+# overwrite or regenerate a value in it.
+
 services:
   - type: web
     name: meru-core-api
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    region: singapore
+    runtime: node
+    region: ohio
+    plan: starter # operator must add a payment method (runbook §0b); [NEEDS DATA: operator's plan choice]
+    numInstances: 1 # one instance: in-process caches and rate limiter are not shared
+    buildCommand: corepack enable && pnpm install --frozen-lockfile --prod=false && pnpm run build
+    startCommand: node dist/src/main
+    # LIMITATION: GET /api/v1/health answers HTTP 200 even when the database is
+    # unreachable. src/health/health.controller.ts catches the failed
+    # `SELECT 1`, sets database:"down" and status:"degraded", and returns the
+    # body with 200 (the 503 in its Swagger annotation is never thrown). It is
+    # the only public GET that reports DB state. The other public GETs cannot
+    # stand in: `/` returns a static string with no DB access, and
+    # /tenants/resolve?host= needs a parameter and answers 404 for an unknown
+    # host even when everything is healthy. So this check
+    # proves "the process booted and is routing", NOT "the database is up":
+    # Render will mark a deploy healthy, and keep it serving, with the DB down.
+    # [UNVERIFIED at runtime: read from the code, not observed with a DB down;
+    # no database was connected to in this pass.]
+    # A DB that is unreachable at BOOT is still caught (TypeORM retries 10 x 3s
+    # and then boot aborts, so the port never opens). Verify the DB by hand
+    # after every deploy: runbook §8, `"database":"up"`.
+    # Backend follow-up (not done here, backend code is out of scope): make
+    # check() throw ServiceUnavailableException when database === 'down'. Then
+    # this path becomes a real DB check with no change to this file. Trade-off
+    # to decide first: Render restarts an instance after 60s of failed checks,
+    # so a short DB blip would restart the API.
     healthCheckPath: /api/v1/health
-    autoDeploy: true
+    autoDeployTrigger: "off" # deploys are manual; see the runbook
     envVars:
+      - fromGroup: meru-secrets
+      - key: NODE_VERSION
+        value: "20"
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 8000
       - key: VERTICAL
         value: core
-      # --- Neon Postgres: two roles, on purpose (see DEPLOY.md / DATABASE.md) ---
-      # Owner role — migrations / DDL only.
-      - key: DATABASE_URL
-        sync: false
-      # meru_app (NOBYPASSRLS) — application runtime. REQUIRED: the app refuses
-      # to start in production without it, because RLS is inert for an owner role.
-      - key: DATABASE_APP_URL
-        sync: false
-      # --- Cache (optional) — the job queue is Postgres-backed, not Redis.
-      # Unset means in-memory caching; add REDIS_HOST/REDIS_PORT to use Redis.
-      # --- Auth / app secrets ---
-      - key: JWT_SECRET
-        generateValue: true
-      - key: JWT_EXPIRATION
-        value: 1h
-      - key: DOCUMENT_ENCRYPTION_KEY
-        generateValue: true
-      # --- CORS (set to your frontend origins) ---
-      - key: CORS_ALLOWED_ORIGINS
-        value: https://app.immistack.com,https://app.governancex.com
-      # --- Optional integrations ---
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: AWS_REGION
-        value: ap-south-1
-      - key: AWS_S3_BUCKET
-        value: meru-documents
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
+      # Production's stored config_packs rows are older than the packs on disk
+      # (CLAUDE.md §16). Keep the boot-time loader off so a deploy does not
+      # change pack behaviour as a side effect; reload deliberately via
+      # POST /api/v1/jobs/packs/reload.
       - key: SKIP_CONFIG_PACK_LOADER
-        value: false
+        value: "true"
+      # Only "on" or "off" are accepted; any other value refuses to boot.
+      # Off = the crons below are the single scheduler. See DESIGN above.
+      - key: INTERNAL_SCHEDULER
+        value: "off"
+
+  # --- scope=fast: queue drain, notification dispatch, SLA watchdog, alert rules.
+  # Every minute. Reaches the API over Render's private network, so no public
+  # hostname is hard-coded here. A non-2xx response fails the run (curl -f),
+  # which Render shows as a failed cron run.
+  - type: cron
+    name: meru-core-tick-fast
+    runtime: node
+    region: ohio
+    plan: starter # crons have no free plan (validated); runbook §0b
+    schedule: "* * * * *"
+    buildCommand: echo "no build step"
+    startCommand: >-
+      curl -fsS --max-time 120 -X POST
+      -H "Authorization: Bearer $CRON_SECRET"
+      "http://$API_HOSTPORT/api/v1/jobs/tick?scope=fast"
+    envVars:
+      - fromGroup: meru-secrets
+      - key: API_HOSTPORT
+        fromService:
+          type: web
+          name: meru-core-api
+          property: hostport
+
+  # --- scope=daily: same endpoint as the Vercel daily cron (0 2 * * *).
+  - type: cron
+    name: meru-core-tick-daily
+    runtime: node
+    region: ohio
+    plan: starter # crons have no free plan (validated); runbook §0b
+    schedule: "0 2 * * *" # UTC
+    buildCommand: echo "no build step"
+    startCommand: >-
+      curl -fsS --max-time 120 -X POST
+      -H "Authorization: Bearer $CRON_SECRET"
+      "http://$API_HOSTPORT/api/v1/jobs/tick?scope=daily"
+    envVars:
+      - fromGroup: meru-secrets
+      - key: API_HOSTPORT
+        fromService:
+          type: web
+          name: meru-core-api
+          property: hostport

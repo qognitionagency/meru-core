@@ -1,17 +1,38 @@
+# Secrets: never into an image layer. `.env*` covers .env, .env.local,
+# .env.backup-preneon and .env.example alike.
+.env*
+
+# Dependencies and build output are produced inside the image
 node_modules
-npm-debug.log
 dist
+coverage
+.nyc_output
+
+# VCS, hosting and editor state
 .git
 .gitignore
-.env
-.env.local
-.env.*.local
-coverage
+.github
+.vercel
+.vercelignore
 .vscode
 .idea
-*.log
 .DS_Store
-uploads
+
+# Not needed to build or run
 test
-.github
-README.md
+docs
+infra
+k8s
+grafana
+*.md
+*.log
+npm-debug.log*
+uploads
+docker-compose*.yml
+fly.toml
+render.yaml
+Dockerfile
+Meru-Core-API.postman_collection.json
+
+# macOS/iCloud duplicate copies ("file 2.ts")
+**/* 2.*

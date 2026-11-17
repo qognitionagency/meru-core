@@ -1,22 +1,40 @@
 # syntax=docker/dockerfile:1
+#
+# Not used by the Render blueprint (render.yaml uses the native node runtime).
+# Kept so `docker build` works if a container host is wanted later.
+#
+# STATUS: written, NOT built. No Docker daemon was available where this was
+# authored, so no `docker build` has been run against it. [UNVERIFIED: image builds]
+#
+# History: the previous file ran `npm ci` against a package-lock.json that this
+# repo does not have (package-lock.json is gitignored; pnpm-lock.yaml is the only
+# lockfile, package.json pins packageManager pnpm@10.26.2), so it could not have
+# built. This one installs with pnpm through corepack, which reads the pinned
+# version from package.json.
+#
+# Node 20 matches the previous Dockerfile. Node 20 reached end-of-life
+# 2026-04-30; bump deliberately, after a build + `npm test` under the new major.
 
 # ---- Builder ----
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 make g++
+# bcrypt / msgpackr-extract may compile from source if no prebuild matches
+RUN apk add --no-cache python3 make g++ \
+  && corepack enable
 
-# Install deps from the npm lockfile (project standard is npm + package-lock.json)
-COPY package.json package-lock.json .npmrc ./
-RUN npm ci
+# Manifest + lockfile first so the install layer caches. pnpm.onlyBuiltDependencies
+# in package.json governs which postinstall scripts may run.
+COPY package.json pnpm-lock.yaml .npmrc ./
+# --prod=false: `nest build` needs devDependencies regardless of NODE_ENV
+RUN pnpm install --frozen-lockfile --prod=false
 
 COPY . .
+RUN pnpm run build
 
-RUN npm run build
-
-# Prune dev dependencies for a slim runtime image
-RUN npm prune --omit=dev
+# Slim the tree for the runtime image (keeps built native addons)
+RUN pnpm prune --prod
 
 # ---- Production ----
 FROM node:20-alpine AS production
@@ -29,6 +47,7 @@ RUN apk add --no-cache dumb-init \
   && addgroup -g 1001 -S nodejs \
   && adduser -S nestjs -u 1001
 
+# COPY keeps pnpm's node_modules/.pnpm symlink layout intact
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
@@ -37,7 +56,7 @@ COPY --from=builder --chown=nestjs:nodejs /app/packages ./packages
 
 USER nestjs
 
-# Hosts inject PORT; default to 8000 to match the app default
+# Hosts inject PORT (Render: 10000); default to 8000 otherwise
 ENV PORT=8000
 EXPOSE 8000
 

@@ -45,7 +45,8 @@ import { SamlService } from './services/saml.service';
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
-        secret: configService.get('jwt.secret') || 'default-secret',
+        // No literal fallback: see JwtStrategy's constructor.
+        secret: configService.getOrThrow<string>('jwt.secret'),
         signOptions: { expiresIn: configService.get('jwt.expiresIn') || '1h' },
       }),
       inject: [ConfigService],

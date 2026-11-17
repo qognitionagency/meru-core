@@ -1,6 +1,12 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
@@ -12,6 +18,8 @@ import { TenantContext } from '../../core/tenancy/tenant-context';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
+  private readonly logger = new Logger(JwtStrategy.name);
+
   /**
    * How long a revocation may take to bite.
    *
@@ -33,12 +41,35 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: configService.get<string>('jwt.secret') || 'default-secret',
+      // getOrThrow, not a literal fallback. JWT_SECRET is `.required()` in the
+      // Joi schema, so a fallback here was unreachable through ConfigModule —
+      // and if it were ever reached, every token would be forgeable by anyone
+      // who has read this file.
+      secretOrKey: configService.getOrThrow<string>('jwt.secret'),
       passReqToCallback: false,
     });
   }
 
-  async validate(payload: JwtPayload) {
+  async validate(payload: JwtPayload & { mfaPending?: boolean }) {
+    // The MFA challenge from `IamService.login` is signed with this same key.
+    // It proves the password leg only; it is good for exactly one thing,
+    // `POST /auth/mfa/verify` (@Public, verified in IamService.verifyMfaLogin),
+    // and must never be accepted as a Bearer credential.
+    if (payload.mfaPending) {
+      throw new UnauthorizedException('MFA challenge is not an access token');
+    }
+
+    // `issueSession` always sets `sid`. The only token minted without one by
+    // design is an impersonation token, which carries `imp` instead and has no
+    // Session row (IamService.issueImpersonationToken). Anything else that is
+    // sid-less — the MFA challenge, the SAML token — is not a session token.
+    //
+    // RESIDUAL RISK, named rather than hidden: an impersonation token cannot
+    // be revoked. It lives 15 minutes and nothing below checks it.
+    if (!payload.sid && !payload.imp) {
+      throw new UnauthorizedException('Token is not bound to a session');
+    }
+
     await this.assertSessionLive(payload.sid);
 
     // Payload is attached to request.user
@@ -62,10 +93,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   /**
    * Reject an access token whose session has been revoked.
    *
-   * A token with no `sid` predates session binding and is accepted — refusing
-   * it would log out every user holding one, and it expires within the hour
-   * anyway. A session row that cannot be read is also accepted: a database
-   * blip must not lock every user out of the platform.
+   * Only reached with no `sid` for an impersonation token; `validate` refuses
+   * every other sid-less token before this runs. (The old "predates session
+   * binding" exemption is void: access tokens live an hour, and every token
+   * from before session binding expired long ago.)
+   *
+   * A session row that cannot be read fails CLOSED with a 503, not a 401: a
+   * revoked token must not work just because the database blinked, and a 503
+   * tells the portals to retry rather than log the user out. The 60s cache of
+   * `true` still carries already-verified sessions through a short blip.
    */
   private async assertSessionLive(sessionId?: string): Promise<void> {
     if (!sessionId) return;
@@ -90,8 +126,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
           }),
       );
       live = !!session && session.expiresAt > new Date();
-    } catch {
-      return;
+    } catch (err) {
+      this.logger.warn(
+        `session check failed for sid=${sessionId}: ${(err as Error).message}`,
+      );
+      throw new ServiceUnavailableException('Session could not be verified');
     }
 
     await this.cache.set(cacheKey, live, JwtStrategy.REVOCATION_TTL_MS);

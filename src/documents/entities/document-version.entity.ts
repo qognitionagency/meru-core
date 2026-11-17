@@ -63,8 +63,21 @@ export class DocumentVersion {
   @Column({ type: 'text', nullable: true })
   checksum: string;
 
-  @Column({ type: 'text', nullable: true })
-  encryptionKey: string;
+  /**
+   * DEAD COLUMN — never written, never read, never returned.
+   *
+   * It used to hold the raw platform-wide `DOCUMENT_ENCRYPTION_KEY` in clear,
+   * and every version read returned it, so any caller who could open one
+   * encrypted document could read back the key every tenant's documents are
+   * under. Nothing is written here now (`DocumentsService.upload` /
+   * `createNewVersion`), migration `1757400000000` NULLed the stored copies,
+   * and `select: false` keeps it out of every find and relation load.
+   * `encryptionAlgorithm` remains the non-secret marker that the bytes are
+   * encrypted. A real key identifier belongs to the envelope-key redesign
+   * (AGENTS.md, "Document encryption — known defects"), not to this column.
+   */
+  @Column({ type: 'text', nullable: true, select: false })
+  encryptionKey?: string | null;
 
   @Column({ type: 'text', nullable: true })
   encryptionAlgorithm: string;

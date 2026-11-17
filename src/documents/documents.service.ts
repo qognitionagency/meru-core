@@ -50,6 +50,29 @@ export interface UploadResult {
   url?: string;
 }
 
+/** A version as it leaves this service: never carries `encryptionKey`. */
+export type DocumentVersionView = Omit<DocumentVersion, 'encryptionKey'>;
+
+/** A document as `findOne` returns it: its versions mapped the same way. */
+export type DocumentWithVersionViews = Omit<Document, 'versions'> & {
+  versions?: DocumentVersionView[];
+};
+
+/**
+ * The explicit response mapping for every version read.
+ *
+ * The second of two controls. `select: false` on the column keeps the value
+ * out of every query; this keeps it out of every response even if a row
+ * arrives carrying it anyway — one read before migration 1757400000000 ran,
+ * or a future `addSelect` somebody adds for a good reason. The property is
+ * removed, not set to undefined, so no serialiser can ever emit it.
+ */
+export function toVersionView(version: DocumentVersion): DocumentVersionView {
+  const view: Partial<DocumentVersion> = { ...version };
+  delete view.encryptionKey;
+  return view as DocumentVersionView;
+}
+
 @Injectable()
 export class DocumentsService {
   private readonly logger = new Logger(DocumentsService.name);
@@ -178,10 +201,7 @@ export class DocumentsService {
         storageProvider: stored.provider,
         fileSize: encrypted.length,
         checksum: this.calculateChecksum(encrypted),
-        encryptionKey:
-          encryptionLevel !== DocumentEncryption.NONE
-            ? this.getEncryptionKey()
-            : undefined,
+        // No `encryptionKey`: the key is never persisted (see the entity).
         encryptionAlgorithm:
           encryptionLevel !== DocumentEncryption.NONE
             ? 'aes-256-gcm'
@@ -503,10 +523,7 @@ export class DocumentsService {
         storageProvider: stored.provider,
         fileSize: encrypted.length,
         checksum: this.calculateChecksum(encrypted),
-        encryptionKey:
-          encryptionLevel !== DocumentEncryption.NONE
-            ? this.getEncryptionKey()
-            : undefined,
+        // No `encryptionKey`: the key is never persisted (see the entity).
         encryptionAlgorithm:
           encryptionLevel !== DocumentEncryption.NONE
             ? 'aes-256-gcm'
@@ -673,7 +690,7 @@ export class DocumentsService {
     id: string,
     tenantId: string,
     actor: Actor,
-  ): Promise<Document> {
+  ): Promise<DocumentWithVersionViews> {
     const document = await this.documentRepo.findOne({
       where: { id, tenantId },
       relations: ['versions', 'uploadedBy'],
@@ -685,14 +702,17 @@ export class DocumentsService {
 
     await this.checkAccess(document, actor, 'read');
 
-    return document;
+    return {
+      ...document,
+      versions: document.versions?.map(toVersionView),
+    };
   }
 
   async getVersions(
     documentId: string,
     tenantId: string,
     actor: Actor,
-  ): Promise<DocumentVersion[]> {
+  ): Promise<DocumentVersionView[]> {
     const document = await this.documentRepo.findOne({
       where: { id: documentId, tenantId },
     });
@@ -703,10 +723,14 @@ export class DocumentsService {
 
     await this.checkAccess(document, actor, 'read');
 
-    return this.versionRepo.find({
+    // Tenant scope: `document_versions` has no tenantId of its own. RLS
+    // inherits through `documentId → documents` (AddTenantRowLevelSecurity),
+    // and the parent was loaded with `{ id, tenantId }` just above.
+    const versions = await this.versionRepo.find({
       where: { documentId },
       order: { versionNumber: 'DESC' },
     });
+    return versions.map(toVersionView);
   }
 
   async getVersion(
@@ -714,7 +738,7 @@ export class DocumentsService {
     versionId: string,
     tenantId: string,
     actor: Actor,
-  ): Promise<DocumentVersion> {
+  ): Promise<DocumentVersionView> {
     const document = await this.documentRepo.findOne({
       where: { id: documentId, tenantId },
     });
@@ -725,6 +749,8 @@ export class DocumentsService {
 
     await this.checkAccess(document, actor, 'read');
 
+    // Tenant scope: as getVersions — RLS via the parent document, and the
+    // parent was loaded with `{ id, tenantId }` above.
     const version = await this.versionRepo.findOne({
       where: { id: versionId, documentId },
     });
@@ -733,7 +759,7 @@ export class DocumentsService {
       throw new NotFoundException('Document version not found');
     }
 
-    return version;
+    return toVersionView(version);
   }
 
   /**
@@ -955,11 +981,16 @@ export class DocumentsService {
     return crypto.createHash('sha256').update(buffer).digest('hex');
   }
 
+  /**
+   * `getOrThrow`, not a literal fallback. Production cannot boot without
+   * `DOCUMENT_ENCRYPTION_KEY` (Joi `.required()` under NODE_ENV=production)
+   * and elsewhere Joi supplies its own default, which `ConfigService.get`
+   * reads before any argument default — so the literal that stood here was
+   * unreachable through ConfigModule. Had it ever been reached, documents
+   * would have been "encrypted" under a key published in this repository.
+   */
   private getEncryptionKey(): string {
-    return this.configService.get(
-      'DOCUMENT_ENCRYPTION_KEY',
-      'default-encryption-key-32-chars!',
-    );
+    return this.configService.getOrThrow<string>('DOCUMENT_ENCRYPTION_KEY');
   }
 
   /**

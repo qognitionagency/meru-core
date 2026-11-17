@@ -190,8 +190,11 @@ export const configuration = () => ({
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
   },
   documents: {
-    encryptionKey:
-      process.env.DOCUMENT_ENCRYPTION_KEY || 'default-encryption-key-32-chars!',
+    // No `encryptionKey` here. Nothing ever read `documents.encryptionKey`,
+    // and it carried its own committed literal fallback that bypassed the
+    // production boot guard on DOCUMENT_ENCRYPTION_KEY above. The one read
+    // path is `ConfigService.getOrThrow('DOCUMENT_ENCRYPTION_KEY')`
+    // (documents.service.ts), which sees the Joi-validated value.
     maxFileSize: parseInt(process.env.MAX_FILE_SIZE || '52428800', 10),
   },
 });

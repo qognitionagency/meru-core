@@ -48,6 +48,7 @@ import { AddUserPractitionerCredential1756920000000 } from '../migrations/175692
 import { AddIamAuditActions1757100000000 } from '../migrations/1757100000000-AddIamAuditActions';
 import { AddJobRunScope1757200000000 } from '../migrations/1757200000000-AddJobRunScope';
 import { AddDocumentReviewStatus1757300000000 } from '../migrations/1757300000000-AddDocumentReviewStatus';
+import { NullDocumentVersionEncryptionKeys1757400000000 } from '../migrations/1757400000000-NullDocumentVersionEncryptionKeys';
 
 /**
  * Every migration, bundled. The Vercel serverless bundle cannot glob the
@@ -141,4 +142,9 @@ export const ALL_MIGRATIONS = [
   // the same commit as the migration file, per this array's own standing
   // instruction.
   AddDocumentReviewStatus1757300000000,
+  // Anton's sign-off, HIGH — erase the platform document key that was stored
+  // in clear on every encrypted version. One-way: down() restores nothing.
+  // Registered in the same change as the migration file, per this array's
+  // standing instruction.
+  NullDocumentVersionEncryptionKeys1757400000000,
 ];

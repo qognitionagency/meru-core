@@ -1,4 +1,10 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Logger,
+  ServiceUnavailableException,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -11,6 +17,8 @@ import { CapabilitiesService } from './capabilities.service';
 @Controller('health')
 @ApiTags('health')
 export class HealthController {
+  private readonly logger = new Logger(HealthController.name);
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly capabilities: CapabilitiesService
@@ -41,6 +49,50 @@ export class HealthController {
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Readiness: 503 when the database cannot answer `SELECT 1`.
+   *
+   * `GET /health` above answers **200 with `database: "down"`**, so a platform
+   * health check pointed at it cannot see a dead database (render.yaml, and
+   * docs/runbooks/render-deploy.md §8). It is left as it is on purpose. Per
+   * render.com/docs/health-checks (as recorded in that runbook), Render stops
+   * routing to an instance after 15 s of failed checks and **restarts it after
+   * 60 s** — so pointing the blueprint here means a database outage longer than
+   * a minute restarts the API, and a restart does not fix a database. What it
+   * buys: a deploy that boots but cannot query is refused instead of marked
+   * live, and traffic stops reaching an instance that can only answer 500s.
+   * Which of those the blueprint wants is the blueprint owner's call; this
+   * route exists so it can make it.
+   *
+   * Public, like `/health`, and says less: no capabilities, no uptime, no
+   * tenant data, and never the driver's error, which can name the database
+   * host. The failure is logged server-side instead.
+   *
+   * Tenancy: none. `SELECT 1` reads no table; an anonymous request binds no
+   * tenant, so `applyRlsToDataSource` sets an empty `app.current_tenant_id`
+   * on the connection and every tenant-scoped policy would match nothing.
+   *
+   * `[UNVERIFIED: behaviour when the pool is exhausted rather than the database
+   * down — the query waits for a connection and the platform's own probe
+   * timeout decides. Not observed.]`
+   */
+  @Get('ready')
+  @Public()
+  @ApiOperation({ summary: 'Readiness probe: 503 when the database is unreachable' })
+  @ApiResponse({ status: 200, description: 'Database answered SELECT 1' })
+  @ApiResponse({ status: 503, description: 'Database unreachable' })
+  async ready(): Promise<{ status: 'ready'; database: 'up' }> {
+    try {
+      await this.dataSource.query('SELECT 1');
+    } catch (error) {
+      this.logger.error(
+        `Readiness: database unreachable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw new ServiceUnavailableException('Database unreachable');
+    }
+    return { status: 'ready', database: 'up' };
   }
 
   /**

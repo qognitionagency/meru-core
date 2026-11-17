@@ -6,7 +6,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, Brackets } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { StorageService } from '../storage/storage.service';
 import { randomUUID } from 'node:crypto';
@@ -31,7 +31,10 @@ import { User } from '../iam/entities/user.entity';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { UploadDocumentDto } from './dto/upload-document.dto';
-import { SearchDocumentsDto } from './dto/search-documents.dto';
+import {
+  DOCUMENT_SORT_COLUMNS,
+  SearchDocumentsDto,
+} from './dto/search-documents.dto';
 import { RequestDocumentUploadUrlDto } from './dto/request-upload-url.dto';
 import { OrchestrationService } from '../orchestration/orchestration.service';
 import { DocumentAccessService } from './document-access.service';
@@ -615,6 +618,22 @@ export class DocumentsService {
       sortOrder = 'DESC',
     } = searchDto;
 
+    // Never caller input into ORDER BY: TypeORM writes an orderBy column
+    // string into the SQL unquoted and unchecked, only the direction is
+    // validated. Mapped through the allow-list here as well as `@IsIn` on the
+    // DTO, so a non-HTTP caller cannot reach the sink either. Refused before
+    // any query is built.
+    const sortColumn = Object.prototype.hasOwnProperty.call(
+      DOCUMENT_SORT_COLUMNS,
+      sortBy,
+    )
+      ? DOCUMENT_SORT_COLUMNS[sortBy as keyof typeof DOCUMENT_SORT_COLUMNS]
+      : undefined;
+    const sortDirection = String(sortOrder).toUpperCase() as 'ASC' | 'DESC';
+    if (!sortColumn || (sortDirection !== 'ASC' && sortDirection !== 'DESC')) {
+      throw new BadRequestException('Unsupported sort');
+    }
+
     const queryBuilder = this.documentRepo.createQueryBuilder('document');
 
     queryBuilder.where('document.tenantId = :tenantId', { tenantId });
@@ -651,17 +670,23 @@ export class DocumentsService {
       queryBuilder.andWhere('document.tags @> :tags', { tags });
     }
 
+    // One bracketed group, ANDed with everything else. The AI branch used to
+    // be a flat `orWhere`, and TypeORM adds no brackets, so the statement read
+    // `(tenant AND … AND name ILIKE q) OR (aiAnalysis ILIKE q AND own-scope)`:
+    // the first branch had no user scope and a client listed every matching
+    // document in the firm (Anton, 2026-11-17, #3). `applyScope` below must
+    // always land as a top-level AND; do not add a flat `orWhere` here.
     if (query) {
       queryBuilder.andWhere(
-        '(document.name ILIKE :query OR document.originalFileName ILIKE :query OR document.slug ILIKE :query)',
-        { query: `%${query}%` },
+        new Brackets((qb) => {
+          qb.where('document.name ILIKE :query', { query: `%${query}%` })
+            .orWhere('document.originalFileName ILIKE :query')
+            .orWhere('document.slug ILIKE :query');
+          if (includeAI === true) {
+            qb.orWhere('document.aiAnalysis::text ILIKE :query');
+          }
+        }),
       );
-
-      if (includeAI) {
-        queryBuilder.orWhere('document.aiAnalysis::text ILIKE :query', {
-          query: `%${query}%`,
-        });
-      }
     }
 
     // User scoping, not just tenant scoping. RLS stops tenant A reading tenant
@@ -672,7 +697,7 @@ export class DocumentsService {
     await this.access.applyScope(queryBuilder, tenantId, actor);
 
     queryBuilder
-      .orderBy(`document.${sortBy}`, sortOrder)
+      .orderBy(`document.${sortColumn}`, sortDirection)
       .skip((page - 1) * limit)
       .take(limit);
 

@@ -248,3 +248,17 @@ export interface FileSearchFilters {
   sortBy?: 'name' | 'size' | 'createdAt' | 'lastAccessedAt';
   sortOrder?: 'asc' | 'desc';
 }
+
+/**
+ * `sortBy` → the StorageFile property it orders by. The only values
+ * `GET /storage/files` accepts; `StorageService.searchFiles` maps through this
+ * and never writes caller input into ORDER BY, because TypeORM does not quote
+ * or check an `orderBy` column string (Anton, 2026-11-17, #1). `name` is the
+ * documented field; the column is `originalName`.
+ */
+export const STORAGE_SORT_COLUMNS = {
+  name: 'originalName',
+  size: 'size',
+  createdAt: 'createdAt',
+  lastAccessedAt: 'lastAccessedAt',
+} as const;

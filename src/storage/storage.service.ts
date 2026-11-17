@@ -27,6 +27,7 @@ import {
   StorageMetrics,
   PresignedUrlOptions,
   ObjectStorageDriver,
+  STORAGE_SORT_COLUMNS,
 } from './interfaces/storage.interface';
 import * as crypto from 'crypto';
 import * as path from 'path';
@@ -837,9 +838,22 @@ export class StorageService {
       });
     }
 
-    const sortBy = filters.sortBy || 'createdAt';
-    const sortOrder = filters.sortOrder?.toUpperCase() || 'DESC';
-    queryBuilder.orderBy(`file.${sortBy}`, sortOrder as 'ASC' | 'DESC');
+    // Never caller input into ORDER BY: TypeORM writes an orderBy column
+    // string into the SQL unquoted and unchecked (Anton, 2026-11-17, #1).
+    // Mapped through the allow-list here as well as `@IsIn` on the DTO, and
+    // refused before the query runs.
+    const sortKey = filters.sortBy || 'createdAt';
+    const sortColumn = Object.prototype.hasOwnProperty.call(
+      STORAGE_SORT_COLUMNS,
+      sortKey,
+    )
+      ? STORAGE_SORT_COLUMNS[sortKey as keyof typeof STORAGE_SORT_COLUMNS]
+      : undefined;
+    const sortOrder = String(filters.sortOrder || 'DESC').toUpperCase();
+    if (!sortColumn || (sortOrder !== 'ASC' && sortOrder !== 'DESC')) {
+      throw new BadRequestException('Unsupported sort');
+    }
+    queryBuilder.orderBy(`file.${sortColumn}`, sortOrder);
 
     const page = filters.page || 1;
     const limit = Math.min(filters.limit || 20, 100);

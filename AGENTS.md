@@ -1356,3 +1356,12 @@ branch is not a change the portals can see (`/api-json` is the check).
      pending rewrite" rather than breaking. Hide or disable the Generate and
      Export buttons alongside the deploy. immistack and meru-dashboard call
      neither route (grepped 2026-11-17).
+   - **`GET /documents` and `GET /storage/files`:** `sortBy` is an allow-list
+     (documents: `createdAt updatedAt name originalFileName fileSize fileType
+     status reviewStatus versionNumber`; storage: `name size createdAt
+     lastAccessedAt`), `sortOrder` is `ASC|DESC` either case, anything else is
+     **400** (Anton #1). `includeAI` on `/documents` is now a real boolean:
+     `?includeAI=false` means false (it used to switch the AI search on), and a
+     non-boolean value is a 400. A `client` token's text search is now
+     own-scoped on every branch, including the AI one (Anton #3). Nothing in
+     the three apps sends `sortBy`, `sortOrder` or `includeAI` (grepped).

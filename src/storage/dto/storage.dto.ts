@@ -9,9 +9,14 @@ import {
   Max,
   IsUUID,
   IsDate,
+  IsIn,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { StorageClass, FileAccess } from '../interfaces/storage.interface';
+import {
+  StorageClass,
+  FileAccess,
+  STORAGE_SORT_COLUMNS,
+} from '../interfaces/storage.interface';
 
 export class UploadFileDto {
   @ApiProperty({ description: 'File name' })
@@ -130,14 +135,22 @@ export class SearchFilesDto {
   @Max(100)
   limit?: number = 20;
 
-  @ApiPropertyOptional({ description: 'Sort by field', default: 'createdAt' })
+  @ApiPropertyOptional({
+    description: 'Sort by field',
+    default: 'createdAt',
+    enum: Object.keys(STORAGE_SORT_COLUMNS),
+  })
   @IsOptional()
-  @IsString()
+  @IsIn(Object.keys(STORAGE_SORT_COLUMNS))
   sortBy?: string = 'createdAt';
 
-  @ApiPropertyOptional({ description: 'Sort order', default: 'desc' })
+  @ApiPropertyOptional({
+    description: 'Sort order',
+    default: 'desc',
+    enum: ['asc', 'desc', 'ASC', 'DESC'],
+  })
   @IsOptional()
-  @IsString()
+  @IsIn(['asc', 'desc', 'ASC', 'DESC'])
   sortOrder?: 'asc' | 'desc' = 'desc';
 }
 

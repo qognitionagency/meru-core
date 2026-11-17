@@ -14,6 +14,7 @@ import { TaskService } from '../tasks/task.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { RetentionService } from '../audit/retention.service';
+import { AuditReconcilerService } from '../audit/audit-reconciler.service';
 import { RegulatoryRadarEngine } from '../ai/engines/regulatory-radar.engine';
 import { JobRunService } from './job-run.service';
 import { NotificationDispatchService } from '../notifications/notification-dispatch.service';
@@ -55,6 +56,21 @@ import { JOB_NAMES, JobName, JobResult, JobScopeEvidence } from './job-catalogue
  * routes, neither of which goes through `handlerFor` — they stay on
  * `JobsController` directly.
  */
+/**
+ * Why an `audit-reconcile` summary is not a clean run, or null if it is.
+ * `complete: false` means the scan stopped at its time budget; `failures`
+ * are reconciled rows that could not be written.
+ */
+function reconcileUnfinished(
+  summary: Record<string, unknown> | undefined,
+): string | null {
+  const failures = Array.isArray(summary?.failures) ? summary.failures.length : 0;
+  const reasons: string[] = [];
+  if (summary?.complete === false) reasons.push('scan incomplete (time budget)');
+  if (failures > 0) reasons.push(`${failures} failure(s) writing reconciled rows`);
+  return reasons.length ? `audit reconcile not clean: ${reasons.join('; ')}` : null;
+}
+
 @Injectable()
 export class JobDispatchService {
   private readonly logger = new Logger(JobDispatchService.name);
@@ -76,6 +92,8 @@ export class JobDispatchService {
     private readonly notificationDispatch: NotificationDispatchService,
     private readonly watchlistIngest: WatchlistIngestService,
     private readonly screeningEngine: ScreeningEngine,
+    // Last, so the positional constructors in the existing specs still line up.
+    private readonly auditReconciler: AuditReconcilerService,
   ) {}
 
   /**
@@ -107,11 +125,20 @@ export class JobDispatchService {
         scope.eligible > 0 &&
         scope.scanned === 0;
 
+      // Owen's gate: a reconcile that stopped at its budget, or could not
+      // write some of its rows, left requests unanswered. Not `ok`.
+      const unfinished =
+        job === 'audit-reconcile' ? reconcileUnfinished(result.summary) : null;
+
       await this.jobRunService.record(job, {
-        status: suspect ? 'suspect' : 'ok',
+        status: suspect || unfinished ? 'suspect' : 'ok',
         durationMs: result.durationMs,
         scope: scope as Record<string, unknown> | undefined,
+        ...(unfinished ? { error: unfinished } : {}),
       });
+      if (unfinished) {
+        this.logger.error(`Job "${job}": ${unfinished}`);
+      }
 
       if (suspect) {
         this.logger.error(
@@ -176,6 +203,11 @@ export class JobDispatchService {
         // `compliance.retentionYears` entirely — the platform was stating a
         // retention period to regulators and keeping a different one.
         return () => this.retentionService.sweep();
+      case 'audit-reconcile':
+        // ADR 0023 D15 item 2. `reconciled` in the summary is the output to
+        // read: each entry is a security-posture change whose outcome row was
+        // never written, and each was logged at error level as the alert.
+        return () => this.auditReconciler.reconcile();
       case 'watchlist-ingest':
         return async () => {
           const result = await this.watchlistIngest.ingestAll();

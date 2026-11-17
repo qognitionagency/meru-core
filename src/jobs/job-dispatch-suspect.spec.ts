@@ -27,6 +27,7 @@ describe('JobDispatchService.runNamed — suspect status (ADR 0018 §3.2)', () =
       undefined as any, // notificationDispatch
       undefined as any, // watchlistIngest
       undefined as any, // screeningEngine
+      undefined as any, // auditReconciler
     );
 
   beforeEach(() => {

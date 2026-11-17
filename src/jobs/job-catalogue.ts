@@ -68,6 +68,10 @@ export const JOB_CADENCE_MINUTES = {
   'daily-billing': 1440,
   'regulatory-radar': 1440,
   'audit-archive': 1440,
+  // ADR 0023 D15 item 2: closes strict-change audit requests left without an
+  // outcome (the process died mid-change). Daily is the ADR's cadence; a
+  // request is eligible once older than AUDIT_RECONCILE_AFTER_MINUTES.
+  'audit-reconcile': 1440,
   // Sanctions lists change daily; screening against a stale list is the
   // failure mode that matters, so this runs with the daily sweep.
   'watchlist-ingest': 1440,

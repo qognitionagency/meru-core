@@ -611,7 +611,7 @@ a version bump; re-run `check:cjs` and the full suite after each.
 
 Anton's sign-off found the platform `DOCUMENT_ENCRYPTION_KEY` stored in clear in
 `document_versions."encryptionKey"` and returned by the version read routes. That
-leak is closed on `wave0/back-online`, **uncommitted, not deployed**: the key is no
+leak is closed on `wave0/back-online`, **not deployed**: the key is no
 longer written, the column is `select: false`, the three read paths map it out
 (`toVersionView`, `src/documents/documents.service.ts`), and migration
 `1757400000000-NullDocumentVersionEncryptionKeys` NULLs the stored copies (**not
@@ -1181,7 +1181,7 @@ Dated, newest last. Each entry says whether it has deployed — a change on a
 branch is not a change the portals can see (`/api-json` is the check).
 
 1. **2026-11-17 — `POST /auth/mfa/disable` now requires `{ token }`.**
-   *Not deployed* — uncommitted on `wave0/back-online`.
+   *Not deployed* — on branch `wave0/back-online`.
    - **Body:** `{ "token": "<six-digit TOTP>" }` (`VerifyMfaSetupDto`, exactly
      6 characters). It took no body before. No/malformed body → **400**
      `MER-VAL-*`; MFA not enabled → **400**; wrong code → **401**
@@ -1209,7 +1209,7 @@ branch is not a change the portals can see (`/api-json` is the check).
      **401**, including the MFA challenge token used as a Bearer.
 
 2. **2026-11-17 — `GET /auth/saml/initiate` and `POST /auth/saml/callback`
-   answer HTTP 501.** *Not deployed* — uncommitted on `wave0/back-online`.
+   answer HTTP 501.** *Not deployed* — on branch `wave0/back-online`.
    - SAML SSO is disabled unconditionally (`SamlService.assertSamlAvailable`,
      spec `src/iam/saml-disabled.spec.ts`): **501** `NotImplementedException`,
      "SAML SSO is disabled pending a library-backed implementation". There is
@@ -1227,7 +1227,7 @@ branch is not a change the portals can see (`/api-json` is the check).
      **Uncommitted there, not deployed.**
 
 3. **2026-11-17 — document version payloads no longer contain
-   `encryptionKey`.** *Not deployed* — uncommitted on `wave0/back-online`.
+   `encryptionKey`.** *Not deployed* — on branch `wave0/back-online`.
    - Affects `GET /documents/:id` (`versions[]`), `GET /documents/:id/versions`,
      `GET /documents/:id/versions/:versionId`, the `version` in the
      `POST /documents/upload` and new-version responses, and every route that
@@ -1239,7 +1239,7 @@ branch is not a change the portals can see (`/api-json` is the check).
      reader of `encryptionKey`. Nothing to change. Detail: §2.3.
 
 4. **2026-11-17 — impersonation tokens are refused (403) on the account
-   holder's own security routes.** *Not deployed* — uncommitted on
+   holder's own security routes.** *Not deployed* — on branch
    `wave0/back-online`.
    - `POST /auth/mfa/setup`, `POST /auth/mfa/setup/verify`,
      `POST /auth/mfa/disable`, `POST /auth/logout-all`,
@@ -1263,7 +1263,7 @@ branch is not a change the portals can see (`/api-json` is the check).
      only; no response shape changes.
 
 5. **2026-11-17 — a security-posture change answers 503 when it cannot be
-   audited.** *Not deployed* — uncommitted on `wave0/back-online`.
+   audited.** *Not deployed* — on branch `wave0/back-online`.
    - `POST /auth/mfa/setup/verify`, `POST /auth/mfa/disable`, and
      `PATCH /iam/users/:id` when it changes `role` or `status`: if the
      `audit_logs` row cannot be written, the change is refused with **503**
@@ -1279,10 +1279,25 @@ branch is not a change the portals can see (`/api-json` is the check).
      change happened. A `*.requested` row with neither outcome after it means
      the process died mid-change; the user's current state is the answer.
      (`IamService.auditedChange`.)
+   - **Only the applied row carries `beforeState`/`afterState`** (Owen's FIX).
+     The `*.requested` and `*.not_applied` rows carry neither, so
+     `AuditService.logEvent` stores `changes: []` for them; the field being
+     changed is in `context.requested: { field, from, to }` instead. Before this
+     fix both rows stored `changes: [{ field: 'role', … }]` and rendered as a
+     change. Every row of one change also carries the same `context.changeId`
+     (a UUID), which is how a request is matched to its outcome; a failed
+     outcome write is logged with it. Spec: `src/iam/iam-audited-change.spec.ts`.
    - **Consumers (grepped all three apps 2026-11-17):** only immistack's
      `settings/audit` page reads these rows, through `AUDIT_ACTION_LABELS` in
-     `lib/api/services/audit.service.ts`, and it shows `description`. A role
-     change now lists as an "Update" row reading "Role change requested for …"
-     followed by a "Role changed" row, and filtering on "Role changed" returns
-     only changes that happened. No code change needed. No app handles a
-     503 on these routes specifically yet.
+     `lib/api/services/audit.service.ts`. Its expanded row shows `description`,
+     then `changes` as "Changed fields" (falling back to raw before/after, then
+     to "No before/after state recorded for this event"), and from `context`
+     only `ipAddress`/`userAgent`/`apiEndpoint`. So after this fix a role change
+     lists as an "Update" row reading "Role change requested for … staff →
+     firm_admin" with **no** changed fields, followed by a "Role changed" row
+     whose changed fields are the real ones; a not-applied row shows its
+     description and no changed fields. Filtering on "Role changed" returns only
+     changes that happened. No code change is needed for that to be true. The
+     page does not show `context.requested` or `context.changeId`; surfacing
+     them is optional frontend work. No app handles a 503 on these routes
+     specifically yet.

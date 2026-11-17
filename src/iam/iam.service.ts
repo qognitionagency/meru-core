@@ -81,8 +81,24 @@ type IamAuditEntry = Omit<
  * would need a migration for no query that `context.event` cannot serve.
  */
 interface AuditedStep {
-  /** Tenant, actor, entity, severity, before/after — shared by every phase. */
-  base: Omit<IamAuditEntry, 'action' | 'description'>;
+  /**
+   * Tenant, actor, entity, severity — shared by every phase. Deliberately
+   * cannot carry `beforeState`/`afterState`: `AuditService.logEvent` derives
+   * `changes` from those two, and ImmiStack's audit page renders `changes`
+   * as "Changed fields". On a request or not_applied row that showed a
+   * change that had not happened. The field being changed goes in `target`.
+   */
+  base: Omit<
+    IamAuditEntry,
+    'action' | 'description' | 'beforeState' | 'afterState'
+  >;
+  /**
+   * The field this step changes, if it is a field change (role, status).
+   * The applied row states it as `beforeState`/`afterState`; the request
+   * and not_applied rows state it as `context.requested` — a target, not a
+   * change.
+   */
+  target?: { field: string; from: unknown; to: unknown };
   /** Written strictly BEFORE the change. Worded as a request, never a fact. */
   requested: { event: string; description: string };
   /** Written after the change succeeded. The only row that states a fact. */
@@ -172,8 +188,13 @@ export class IamService {
     try {
       await this.auditService.logEvent(this.toAuditEvent(entry));
     } catch (err: unknown) {
+      // `changeId` is set on `auditedChange`'s outcome rows; naming it here
+      // lets an operator find the request row this outcome was meant to close.
+      const changeId = entry.context?.changeId;
       this.logger.error(
-        `Failed to write audit entry (${entry.action} on ${entry.entityType} ${entry.entityId}): ` +
+        `Failed to write audit entry (${String(entry.context?.event ?? entry.action)} on ${entry.entityType} ${entry.entityId}` +
+          (changeId ? `, changeId ${String(changeId)}` : '') +
+          '): ' +
           (err instanceof Error ? err.message : String(err)),
       );
     }
@@ -226,6 +247,16 @@ export class IamService {
    * row with neither outcome after it means the process died mid-change, and
    * the user's current state is the answer.
    *
+   * Only the applied row carries `beforeState`/`afterState` (from
+   * `step.target`). The request and not_applied rows name the target in
+   * `context.requested` instead, so `AuditService.logEvent` computes no
+   * `changes` for them and no audit view can render one as a changed field.
+   *
+   * Every row of one call carries the same `context.changeId` (a fresh
+   * UUID), so a request row can be matched to its outcome — or found to
+   * have none. Two steps in one call share it; `context.event` tells them
+   * apart.
+   *
    * Not one SQL transaction: `AuditService.logEvent` uses its own injected
    * repository and accepts no caller `EntityManager`, and widening that for
    * every module that audits is a larger change than this one.
@@ -234,6 +265,7 @@ export class IamService {
     steps: AuditedStep[],
     change: () => Promise<T>,
   ): Promise<T> {
+    const changeId = crypto.randomUUID();
     const requested: AuditedStep[] = [];
     for (const step of steps) {
       try {
@@ -244,10 +276,12 @@ export class IamService {
           context: {
             ...(step.base.context ?? {}),
             event: step.requested.event,
+            changeId,
+            ...(step.target ? { requested: step.target } : {}),
           },
         });
       } catch (err) {
-        await this.recordNotApplied(requested, 'audit_unavailable');
+        await this.recordNotApplied(requested, changeId, 'audit_unavailable');
         throw err;
       }
       requested.push(step);
@@ -259,6 +293,7 @@ export class IamService {
     } catch (err) {
       await this.recordNotApplied(
         steps,
+        changeId,
         err instanceof NotFoundException ? 'no_row_updated' : 'write_failed',
       );
       throw err;
@@ -269,15 +304,30 @@ export class IamService {
         ...step.base,
         action: step.applied.action ?? AuditAction.UPDATE,
         description: step.applied.description,
-        context: { ...(step.base.context ?? {}), event: step.applied.event },
+        ...(step.target
+          ? {
+              beforeState: { [step.target.field]: step.target.from },
+              afterState: { [step.target.field]: step.target.to },
+            }
+          : {}),
+        context: {
+          ...(step.base.context ?? {}),
+          event: step.applied.event,
+          changeId,
+        },
       });
     }
     return result;
   }
 
-  /** Best-effort `not_applied` rows for `auditedChange`. Never throws. */
+  /**
+   * Best-effort `not_applied` rows for `auditedChange`. Never throws.
+   * No `beforeState`/`afterState`: nothing changed, so nothing may read as
+   * a changed field. The target goes in `context.requested`.
+   */
   private async recordNotApplied(
     steps: AuditedStep[],
+    changeId: string,
     reason: NotAppliedReason,
   ): Promise<void> {
     for (const step of steps) {
@@ -289,7 +339,9 @@ export class IamService {
         context: {
           ...(step.base.context ?? {}),
           event: step.notApplied.event,
+          changeId,
           reason,
+          ...(step.target ? { requested: step.target } : {}),
         },
       });
     }
@@ -1479,11 +1531,8 @@ export class IamService {
     if (updates.role !== undefined && updates.role !== previousRole) {
       const change = `${previousRole} → ${updates.role}`;
       steps.push({
-        base: {
-          ...actorFields,
-          beforeState: { role: previousRole },
-          afterState: { role: updates.role },
-        },
+        base: actorFields,
+        target: { field: 'role', from: previousRole, to: updates.role },
         requested: {
           event: 'role.change.requested',
           description: `Role change requested for ${user.email}: ${change}`,
@@ -1503,11 +1552,8 @@ export class IamService {
     if (updates.status !== undefined && updates.status !== previousStatus) {
       const change = `${previousStatus} → ${updates.status}`;
       steps.push({
-        base: {
-          ...actorFields,
-          beforeState: { status: previousStatus },
-          afterState: { status: updates.status },
-        },
+        base: actorFields,
+        target: { field: 'status', from: previousStatus, to: updates.status },
         requested: {
           event: 'status.change.requested',
           description: `Status change requested for ${user.email}: ${change}`,

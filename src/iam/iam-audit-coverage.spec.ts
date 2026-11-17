@@ -502,12 +502,22 @@ describe('IamService — IAM audit coverage', () => {
           'role.changed',
         ]);
         const [requested, changed] = auditEvents;
+        // The request names its target in context, never as before/after —
+        // `logEvent` would turn before/after into a "Changed fields" entry
+        // for a change that has not happened (iam-audited-change.spec.ts).
         expect(requested).toMatchObject({
           action: AuditAction.UPDATE,
           entityId: 'u1',
-          beforeState: { role: PlatformRole.STAFF },
-          afterState: { role: PlatformRole.FIRM_ADMIN },
+          context: {
+            requested: {
+              field: 'role',
+              from: PlatformRole.STAFF,
+              to: PlatformRole.FIRM_ADMIN,
+            },
+          },
         });
+        expect(requested).not.toHaveProperty('beforeState');
+        expect(requested).not.toHaveProperty('afterState');
         expect(requested.description).toMatch(/requested/i);
         expect(changed.action).toBe(AuditAction.ROLE_CHANGED);
 

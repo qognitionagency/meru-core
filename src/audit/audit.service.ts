@@ -1,4 +1,9 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between } from 'typeorm';
 import {
@@ -9,6 +14,26 @@ import {
 } from './entities/audit-log.entity';
 import { toCsv } from '../common/csv';
 import * as crypto from 'crypto';
+
+/**
+ * The `pg_advisory_xact_lock(bigint)` key for a tenant's audit chain: the
+ * first 8 bytes of SHA-256(`audit_chain:` + tenantId), read as a signed 64-bit
+ * integer and returned as a decimal string (bound as `$1::bigint`; a JS number
+ * cannot hold 64 bits).
+ *
+ * The `audit_chain:` prefix keeps this key space apart from any other advisory
+ * lock a future caller derives from a tenant id. A collision between two
+ * tenants' keys only makes their audit writes wait on each other; it cannot
+ * link one tenant's row into the other's chain, because the tip read filters
+ * on `tenantId`.
+ */
+export function auditChainLockKey(tenantId: string): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`audit_chain:${tenantId}`)
+    .digest();
+  return digest.readBigInt64BE(0).toString();
+}
 
 export interface LogAuditEventDto {
   tenantId: string;
@@ -41,6 +66,25 @@ export interface AuditQueryDto {
   offset?: number;
 }
 
+/** Transaction-local bounds on an audit write. See `logEvent`. */
+const AUDIT_LOCK_TIMEOUT = '5s';
+const AUDIT_STATEMENT_TIMEOUT = '15s';
+
+/**
+ * A lock wait or statement that hit its bound is a busy dependency, not a bad
+ * request: 503, which strict callers already treat as "refused, retry".
+ * 55P03 lock_not_available, 57014 query_canceled. Anything else propagates.
+ */
+function rethrowAuditTimeout(err: unknown): never {
+  const code = (err as { code?: string } | null)?.code;
+  if (code === '55P03' || code === '57014') {
+    throw new ServiceUnavailableException(
+      'Audit log busy — write refused, retry',
+    );
+  }
+  throw err;
+}
+
 @Injectable()
 export class AuditService {
   private readonly logger = new Logger(AuditService.name);
@@ -52,61 +96,110 @@ export class AuditService {
 
   // ==================== WORM LOGGING ====================
 
+  /**
+   * Append one row to the tenant's hash chain.
+   *
+   * **The chain cannot fork (ADR 0023 D15 item 3, Anton AC.C3).** The tip read
+   * and the insert run in ONE transaction that first takes
+   * `pg_advisory_xact_lock` on a per-tenant key, so two writes in one tenant
+   * serialise on the tip. Before this, the tip was a plain `findOne` and the
+   * insert a separate `save`: two concurrent writers could both read the same
+   * tip, both link to it, and `verifyChain` would then report legitimate data
+   * as tampered. The lock is released by Postgres at commit or rollback; there
+   * is no unlock call to forget. Writes in different tenants take different
+   * keys and do not wait on each other.
+   *
+   * The timestamp is taken AFTER the lock is held, and forced strictly past the
+   * tip's. `verifyChain` walks rows in `timestamp` order, so a writer that
+   * stamped itself before waiting on the lock (or a clock behind the tip) would
+   * otherwise sort before the row it links to and read as a break.
+   *
+   * **Tenancy.** Every statement here carries the row's own `tenantId`
+   * explicitly — the lock key, the tip read's `where`, the insert — and runs on
+   * one connection that `applyRlsToDataSource` bound when the transaction
+   * checked it out (`obtainMasterConnection` is the choke point every
+   * transaction passes through, so the binding and the lock share a session).
+   * Under a request that is the caller's tenant, and FORCE RLS's `WITH CHECK`
+   * refuses an insert for any other. Under `runAsSystem` / `runAsGod` (the
+   * god-mode entry, jobs) RLS is bypassed and the explicit `tenantId` predicate
+   * is what keeps the tip read inside the right chain.
+   *
+   * Fails closed: if the lock, the read or the insert fails, the transaction
+   * rolls back and the error reaches the caller. Strict callers
+   * (`IamService.auditStrict`, `runAsGod`) depend on that.
+   */
   async logEvent(dto: LogAuditEventDto): Promise<AuditLog> {
-    const now = new Date();
     const changes = this.calculateChanges(dto.beforeState, dto.afterState);
 
-    // Per-event payload checksum (individual row integrity)
-    const checksum = this.generateChecksum({
-      tenantId: dto.tenantId,
-      timestamp: now,
-      userId: dto.userId,
-      action: dto.action,
-      entityId: dto.entityId,
-      beforeState: dto.beforeState,
-      afterState: dto.afterState,
-    });
+    const saved = await this.auditRepo.manager.transaction(async (em) => {
+      // Bound the wait (Owen's gate): a stalled lock holder must make audit
+      // writes in its tenant fail, not hang. SET LOCAL ends with this
+      // transaction, so nothing leaks to the connection's next user.
+      // [NEEDS DATA: 5s/15s are proposals, not measured p99s — Anton/Jonas.]
+      await em.query(`SET LOCAL lock_timeout = '${AUDIT_LOCK_TIMEOUT}'`);
+      await em.query(`SET LOCAL statement_timeout = '${AUDIT_STATEMENT_TIMEOUT}'`);
+      await em.query('SELECT pg_advisory_xact_lock($1::bigint)', [
+        auditChainLockKey(dto.tenantId),
+      ]);
 
-    // Hash chain: previous chain hash → this log's chain position
-    const previousChainHash = await this.getLastChainHash(dto.tenantId);
-    const chainHash = this.computeChainHash(
-      previousChainHash,
-      dto.tenantId,
-      now,
-      dto.action,
-      dto.entityId,
-      dto.userId,
-      checksum,
-    );
+      const repo = em.getRepository(AuditLog);
+      const tip = await this.getChainTip(repo, dto.tenantId);
+      const now = this.nextTimestamp(tip?.timestamp);
 
-    const auditLog = this.auditRepo.create({
-      tenantId: dto.tenantId,
-      vertical: dto.context?.['vertical'],
-      environment: dto.context?.['environment'],
-      timestamp: now,
-      userId: dto.userId,
-      userEmail: dto.userEmail,
-      userRole: dto.userRole,
-      action: dto.action,
-      entityType: dto.entityType,
-      entityId: dto.entityId,
-      description: dto.description,
-      severity: dto.severity || AuditSeverity.INFO,
-      beforeState: dto.beforeState || null,
-      afterState: dto.afterState || null,
-      changes,
-      context: dto.context || {},
-      complianceStandard: dto.complianceStandard,
-      complianceMetadata: dto.complianceMetadata || {},
-      checksum,
-      previousChainHash,
-      chainHash,
-      archived: false,
-    });
+      // Per-event payload checksum (individual row integrity)
+      const checksum = this.generateChecksum({
+        tenantId: dto.tenantId,
+        timestamp: now,
+        userId: dto.userId,
+        action: dto.action,
+        entityId: dto.entityId,
+        beforeState: dto.beforeState,
+        afterState: dto.afterState,
+      });
 
-    const saved = await this.auditRepo.save(auditLog);
+      // Hash chain: previous chain hash → this log's chain position
+      const previousChainHash =
+        tip?.chainHash ?? this.genesisHash(dto.tenantId);
+      const chainHash = this.computeChainHash(
+        previousChainHash,
+        dto.tenantId,
+        now,
+        dto.action,
+        dto.entityId,
+        dto.userId,
+        checksum,
+      );
+
+      const auditLog = repo.create({
+        tenantId: dto.tenantId,
+        vertical: dto.context?.['vertical'],
+        environment: dto.context?.['environment'],
+        timestamp: now,
+        userId: dto.userId,
+        userEmail: dto.userEmail,
+        userRole: dto.userRole,
+        action: dto.action,
+        entityType: dto.entityType,
+        entityId: dto.entityId,
+        description: dto.description,
+        severity: dto.severity || AuditSeverity.INFO,
+        beforeState: dto.beforeState || null,
+        afterState: dto.afterState || null,
+        changes,
+        context: dto.context || {},
+        complianceStandard: dto.complianceStandard,
+        complianceMetadata: dto.complianceMetadata || {},
+        checksum,
+        previousChainHash,
+        chainHash,
+        archived: false,
+      });
+
+      return repo.save(auditLog);
+    }).catch(rethrowAuditTimeout);
+
     this.logger.debug(
-      `Audit log created: ${saved.id} chain: ${chainHash.slice(0, 8)}…`,
+      `Audit log created: ${saved.id} chain: ${saved.chainHash.slice(0, 8)}…`,
     );
 
     return saved;
@@ -526,15 +619,28 @@ export class AuditService {
     return changes;
   }
 
-  // Returns the previous chainHash for the last log in the tenant's chain.
-  // Returns the genesis hash if this is the first log for the tenant.
-  private async getLastChainHash(tenantId: string): Promise<string> {
-    const last = await this.auditRepo.findOne({
+  // The last row in the tenant's chain, or null if the tenant has none yet
+  // (the caller then links to the genesis hash). Must be called on the
+  // transaction's repository, with the chain lock already held.
+  private getChainTip(
+    repo: Repository<AuditLog>,
+    tenantId: string,
+  ): Promise<Pick<AuditLog, 'chainHash' | 'timestamp'> | null> {
+    return repo.findOne({
       where: { tenantId },
       order: { timestamp: 'DESC', createdAt: 'DESC' },
-      select: ['chainHash'],
+      select: ['chainHash', 'timestamp'],
     });
-    return last?.chainHash ?? this.genesisHash(tenantId);
+  }
+
+  // Now, or 1 ms past the tip if the tip is not already behind us — so a new
+  // row always sorts after the row it links to.
+  private nextTimestamp(tipTimestamp?: Date | null): Date {
+    const now = new Date();
+    if (tipTimestamp && now.getTime() <= tipTimestamp.getTime()) {
+      return new Date(tipTimestamp.getTime() + 1);
+    }
+    return now;
   }
 
   // Deterministic genesis anchor per tenant — not stored, re-derivable.

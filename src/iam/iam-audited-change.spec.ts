@@ -64,13 +64,21 @@ describe('IamService.auditedChange — request and not_applied rows state no cha
     // A real AuditService over a stub repository: `stored` holds exactly
     // what `logEvent` would have persisted, `changes` included.
     const stored: Array<Record<string, any>> = [];
-    const auditRepo = {
+    const auditRepo: any = {
       findOne: jest.fn(async () => null),
       create: jest.fn((x: any) => x),
       save: jest.fn(async (x: any) => {
         stored.push(x);
         return { id: `audit-${stored.length}`, ...x };
       }),
+    };
+    // `logEvent` writes inside a transaction holding the per-tenant chain
+    // lock (audit.service.ts). The stub transaction runs the callback against
+    // this same repository, and its `query` (the lock, the SET LOCAL
+    // timeouts) is a no-op.
+    auditRepo.manager = {
+      transaction: async (fn: (em: any) => unknown) =>
+        fn({ query: async () => undefined, getRepository: () => auditRepo }),
     };
     const auditService = new AuditService(auditRepo as any);
     const logEvent = jest.spyOn(auditService, 'logEvent');

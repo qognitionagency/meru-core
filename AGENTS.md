@@ -625,6 +625,11 @@ stored afterwards. Run it as the owner role (`DATABASE_URL`). Spec:
 document could read it back. **It cannot be rotated safely yet** — see the first
 row below.
 
+The one-off replacement on the move to Render is a **forced re-key, not a rotation**
+(nobody holds the old key); the ruling and what it orphans are in
+[`docs/runbooks/render-deploy.md`](docs/runbooks/render-deploy.md) §1, "Ruling on the
+document key".
+
 The wider design is broken, and that redesign was deliberately **not** started:
 
 | Defect | Where | Consequence |

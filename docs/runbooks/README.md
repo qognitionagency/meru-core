@@ -13,6 +13,7 @@ pressure, by someone who cannot ask a question.
 |---|---|---|
 | [`provision-a-database.md`](provision-a-database.md) | engineer standing up or recovering a Postgres | New vertical database (ADR 0013), control-plane recovery, a throwaway environment, or any `rls:verify` failure |
 | [`email-delivery.md`](email-delivery.md) | whoever owns "the invite never arrived" | An invite/reset did not arrive, or you are trying to onboard the first real customer |
+| [`render-deploy.md`](render-deploy.md) | operator standing the platform up on Render after Vercel was disabled | First deploy, env group, crons, smoke checks, rollback; includes the unresolved encryption-key gate |
 
 ## Required of every runbook here
 

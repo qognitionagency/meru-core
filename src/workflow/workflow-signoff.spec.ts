@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { CrmAccessService } from '../crm/crm-access.service';
 import { WorkflowEngineService } from './workflow.service';
 import { WorkflowController } from './workflow.controller';
 import { InstanceStatus } from './entities/workflow-instance.entity';
@@ -94,6 +95,7 @@ describe('WorkflowEngineService.transition — sign-off gate (ADR 0027)', () => 
       unused, // rules
       auditService as any,
       usersRepo as any,
+      new CrmAccessService(),
     );
 
     return { service, instance, usersRepo };

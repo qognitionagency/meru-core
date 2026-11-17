@@ -55,6 +55,9 @@ export class WorkflowController {
   @ApiQuery({ name: 'workflowId', required: false })
   @ApiQuery({ name: 'since', required: false, description: 'ISO date' })
   @ApiQuery({ name: 'limit', required: false, type: Number })
+  // Firm-wide turnaround across every matter: staff and above (Anton,
+  // 2026-11-17). Same pair as `transition`.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   async tatAggregate(
     @Request() req,
     @Query('workflowId') workflowId?: string,
@@ -76,9 +79,17 @@ export class WorkflowController {
       'the record it describes. The final entry is the stage the record is ' +
       'in now and is marked `open`.',
   })
-  @ApiResponse({ status: 404, description: 'No such instance for this tenant' })
+  @ApiResponse({
+    status: 404,
+    description: "No such instance for this tenant, or not this caller's",
+  })
   async tatForInstance(@Request() req, @Param('id') id: string) {
-    return this.tat.forInstance(req.user.tenantId, id);
+    // Own-scoped in the service for a caller without tenant-wide reach.
+    return this.tat.forInstance(req.user.tenantId, id, {
+      id: req.user.id,
+      roles: req.user.roles ?? [],
+      email: req.user.email,
+    });
   }
 
   // ==================== PACK WORKFLOWS (Layer 4) ====================

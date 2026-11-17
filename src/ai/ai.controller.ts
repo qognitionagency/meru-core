@@ -85,6 +85,9 @@ export class AiController {
 
   @Post('embeddings')
   @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  // Writes into the store `GET /ai/search` ranks, with a caller-chosen
+  // `resourceId`: staff and above (Anton, 2026-11-17). No frontend calls it.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Create an embedding for text' })
   @ApiResponse({ status: 200, description: 'Embedding created' })
@@ -103,6 +106,9 @@ export class AiController {
 
   @Get('search')
   @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  // Ranks every embedding in the tenant and returns the rows — not
+  // own-scoped, so staff and above (Anton, 2026-11-17). No frontend calls it.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Semantic search using embeddings' })
   @ApiQuery({ name: 'query', required: true })

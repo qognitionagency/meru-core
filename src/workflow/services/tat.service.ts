@@ -1,6 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { Actor, hasTenantWideReach } from '../../common/access';
+import { WorkflowEngineService } from '../workflow.service';
 import {
   InstanceStatus,
   WorkflowInstance,
@@ -64,10 +66,29 @@ export class TatService {
   constructor(
     @InjectRepository(WorkflowInstance)
     private readonly instances: Repository<WorkflowInstance>,
+    // For the one instance-ownership rule (`getInstance`).
+    @Inject(forwardRef(() => WorkflowEngineService))
+    private readonly workflows: WorkflowEngineService,
   ) {}
 
-  /** Per-stage timings for one instance. */
-  async forInstance(tenantId: string, instanceId: string): Promise<InstanceTat> {
+  /**
+   * Per-stage timings for one instance.
+   *
+   * Own-scoped (Anton, 2026-11-17 — this filtered `{ id, tenantId }` only, so
+   * a `client` could read any applicant's matter timeline): a caller without
+   * tenant-wide reach must pass `WorkflowEngineService.getInstance`, the one
+   * instance-ownership rule (started it, or owns the record), else 404.
+   * Tenant scope: `tenantId` from the caller's JWT, RLS, and the explicit
+   * predicate below and in `getInstance`.
+   */
+  async forInstance(
+    tenantId: string,
+    instanceId: string,
+    actor: Actor,
+  ): Promise<InstanceTat> {
+    if (!hasTenantWideReach(actor)) {
+      await this.workflows.getInstance(instanceId, tenantId, actor);
+    }
     const instance = await this.instances.findOne({
       where: { id: instanceId, tenantId },
       relations: ['currentState'],

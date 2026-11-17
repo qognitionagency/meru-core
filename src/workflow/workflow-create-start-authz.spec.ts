@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { NotFoundException } from '@nestjs/common';
 import { WorkflowController } from './workflow.controller';
 import { WorkflowEngineService } from './workflow.service';
+import { CrmAccessService } from '../crm/crm-access.service';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
 import { ROLES_KEY } from '../iam/decorators/roles.decorator';
 
@@ -50,6 +51,8 @@ describe('Workflow create/start — staff only, and only on an owned entity', ()
     const svc: any = Object.assign(Object.create(WorkflowEngineService.prototype), {
       logger: { log: jest.fn(), error: jest.fn(), warn: jest.fn() },
       entityRepo: { createQueryBuilder: jest.fn(() => qb) },
+      // ownedEntityIds asks CrmAccessService.applyScope for the predicate.
+      crmAccess: new CrmAccessService(),
       workflowRepo: {
         findOne: jest.fn(async () => ({
           id: 'w1',

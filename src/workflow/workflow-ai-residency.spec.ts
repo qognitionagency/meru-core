@@ -1,4 +1,5 @@
 import { WorkflowEngineService } from './workflow.service';
+import { CrmAccessService } from '../crm/crm-access.service';
 
 /**
  * `analyzeWorkflowPerformance` and `getWorkflowRecommendations` set
@@ -35,6 +36,7 @@ describe('WorkflowEngineService — AI residency (tenantId passed top-level)', (
       unused, // rules
       unused, // auditService
       unused, // usersRepo
+      new CrmAccessService(),
     );
   }
 

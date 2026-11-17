@@ -370,6 +370,11 @@ export class NotificationsController {
       },
     },
   })
+  // A tenant template overrides the pack template of the same key on every
+  // firm send (`NotificationsService.resolveTemplate`), so writing one is a
+  // firm-admin act; it had no @Roles and any token, a client's included,
+  // could create one (Anton, 2026-11-17).
+  @Roles(PlatformRole.FIRM_ADMIN, PlatformRole.PLATFORM_ADMIN)
   async createTemplate(@Request() req, @Body() dto: CreateTemplateDto) {
     const template = await this.notificationsService.createTemplate(
       req.user.tenantId,
@@ -386,6 +391,7 @@ export class NotificationsController {
   })
   @ApiQuery({ name: 'type', enum: ['email', 'sms', 'push'], required: false })
   @ApiResponse({ status: 200, description: 'Templates retrieved successfully' })
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   async getTemplates(@Request() req, @Query('type') type?: string) {
     const templates = await this.notificationsService.getTemplates(
       req.user.tenantId,

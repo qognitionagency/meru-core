@@ -22,6 +22,7 @@ import {
 import { SearchService } from '../search/search.service';
 import { AiService } from '../ai/ai.service';
 import { DocumentHubService } from '../documents/document-hub.service';
+import { DocumentAccessService } from '../documents/document-access.service';
 import { Document } from '../documents/entities/document.entity';
 import { Actor, hasTenantWideReach } from '../common/access';
 
@@ -62,6 +63,9 @@ export class FormBuilderService {
     private aiService: AiService,
     @Inject(forwardRef(() => DocumentHubService))
     private documentHubService: DocumentHubService,
+    // The one "is this record theirs" rule (assignee OR subject email).
+    @Inject(forwardRef(() => DocumentAccessService))
+    private documentAccess: DocumentAccessService,
   ) {}
 
   // ==================== FORM SCHEMA ====================
@@ -315,10 +319,20 @@ export class FormBuilderService {
   async createSubmission(
     formSchemaId: string,
     tenantId: string,
-    userId: string,
+    actor: Actor,
     data: Record<string, any>,
     entityId?: string,
   ): Promise<FormSubmission> {
+    // Anton, 2026-11-17: `entityId` was written as given, so a client could
+    // attach a submission to another applicant's record. A caller without
+    // tenant-wide reach must own it — `DocumentAccessService.assertOwnsEntity`,
+    // the same rule documents and generation use — 404 before anything is
+    // read or written. Tenant scope: `tenantId` from the caller's JWT, RLS,
+    // and the explicit predicate in the ownership query and `getForm`.
+    if (entityId) {
+      await this.documentAccess.assertOwnsEntity(tenantId, entityId, actor);
+    }
+    const userId = actor.id;
     const form = await this.getForm(formSchemaId, tenantId);
 
     // Validate data

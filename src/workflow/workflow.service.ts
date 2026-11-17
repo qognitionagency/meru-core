@@ -10,6 +10,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
+import { CrmAccessService } from '../crm/crm-access.service';
 import { Actor, hasTenantWideReach, SYSTEM_ACTOR } from '../common/access';
 import type { UserPayload } from '../common/types';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
@@ -153,6 +154,9 @@ export class WorkflowEngineService {
     // appending each new dependency at the end.
     @InjectRepository(User)
     private readonly usersRepo: Repository<User>,
+    // The CRM ownership predicate, so `ownedEntityIds` is not a third copy
+    // of it (Anton, 2026-11-17). Appended last, per the note above.
+    private readonly crmAccess: CrmAccessService,
   ) {}
 
   // ==================== WORKFLOW DEFINITION ====================
@@ -358,40 +362,25 @@ export class WorkflowEngineService {
   }
 
   /**
-   * The CRM records a caller owns, as ids — same field, same query
-   * `DocumentAccessService.ownedEntityIds` uses for documents, kept local
-   * here rather than shared because each domain's ownership rule is its own
-   * (workflow instances additionally check `startedBy`; documents check
-   * `uploadedById`).
+   * The CRM records a caller owns, as ids. Workflow instances add their own
+   * `startedBy` clause on top (see `assertInstanceOwnership`); "which records
+   * are theirs" is CRM's rule and is asked of `CrmAccessService.applyScope`
+   * (assignee OR subject email) rather than restated here — this used to be
+   * a third hand-written copy of it (Anton, 2026-11-17).
+   *
+   * Called only for a caller WITHOUT tenant-wide reach: `applyScope` is a
+   * no-op for staff, so a staff actor here would get every record.
+   * Tenant scope: RLS plus the explicit `"tenantId"` predicate below.
    */
   private async ownedEntityIds(
     tenantId: string,
     actor: Actor,
   ): Promise<string[]> {
-    // Two senses of ownership, matching `CrmAccessService.ownsEntity` and
-    // `DocumentAccessService.ownedEntityIds`. Staff own by assignment; an
-    // applicant owns by being the record's SUBJECT, because they are never
-    // the assignee of their own case.
-    //
-    // This read `assignedTo` alone, so the "client is tracking their own
-    // matter's stage" case the comment above describes returned nothing at
-    // all for every client — the same defect as `/crm/entities` and document
-    // access, in the third of four places it appeared.
-    const email = actor.email?.trim().toLowerCase();
-
     const qb = this.entityRepo
       .createQueryBuilder('e')
       .select('e.id', 'id')
       .where('e."tenantId" = :tenantId', { tenantId });
-
-    if (email) {
-      qb.andWhere(
-        '(e."assignedTo" = :userId OR LOWER(TRIM(e."subjectEmail")) = :email)',
-        { userId: actor.id, email },
-      );
-    } else {
-      qb.andWhere('e."assignedTo" = :userId', { userId: actor.id });
-    }
+    this.crmAccess.applyScope(qb, actor, 'e');
 
     const rows = await qb.getRawMany<{ id: string }>();
     return rows.map((r) => r.id);

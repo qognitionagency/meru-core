@@ -1,4 +1,5 @@
 import { WorkflowEngineService } from './workflow.service';
+import { CrmAccessService } from '../crm/crm-access.service';
 import { InstanceStatus } from './entities/workflow-instance.entity';
 import { SYSTEM_ACTOR } from '../common/access';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
@@ -85,6 +86,7 @@ describe('WorkflowEngineService.transition — automated attribution & audit (AD
       unused, // rules
       auditService as any,
       unused, // usersRepo
+      new CrmAccessService(),
     );
 
     return { service, instance, auditService };

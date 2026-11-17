@@ -1,4 +1,5 @@
 import { WorkflowEngineService } from './workflow.service';
+import { CrmAccessService } from '../crm/crm-access.service';
 import { InstanceStatus } from './entities/workflow-instance.entity';
 import { Actor } from '../common/access';
 
@@ -144,10 +145,11 @@ describe('WorkflowEngineService.listInstances — list-route actor scoping', () 
               .filter(
                 (e: any) =>
                   e.tenantId === params.tenantId &&
-                  (e.assignedTo === params.userId ||
-                    (!!params.email &&
+                  // Bound by CrmAccessService.applyScope.
+                  (e.assignedTo === params.crmActorId ||
+                    (!!params.crmActorEmail &&
                       (e.subjectEmail ?? '').trim().toLowerCase() ===
-                        params.email)),
+                        params.crmActorEmail)),
               )
               .map((e: any) => ({ id: e.id })),
         };
@@ -172,6 +174,7 @@ describe('WorkflowEngineService.listInstances — list-route actor scoping', () 
       unused, // rules
       unused, // auditService
       unused, // usersRepo
+      new CrmAccessService(),
     );
 
     return service;

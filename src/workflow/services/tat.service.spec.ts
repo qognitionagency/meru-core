@@ -41,30 +41,33 @@ describe('TatService', () => {
     }),
   };
 
-  const service = new TatService(repo as any);
+  // Staff: tenant-wide reach, so the ownership rule is never consulted
+  // (client reach is pinned in tat-authz.spec.ts).
+  const staff = { id: 's1', roles: ['staff'] };
+  const service = new TatService(repo as any, undefined as any);
 
   it('measures each closed stage from the previous transition', async () => {
-    const tat = await service.forInstance('t1', 'i1');
+    const tat = await service.forInstance('t1', 'i1', staff);
     expect(tat.stages[0]).toMatchObject({ stage: 'intake', hours: 30, open: false });
     expect(tat.stages[1]).toMatchObject({ stage: 'documents', hours: 60, open: false });
   });
 
   it('marks the stage the record is sitting in as open', async () => {
-    const tat = await service.forInstance('t1', 'i1');
+    const tat = await service.forInstance('t1', 'i1', staff);
     const current = tat.stages[tat.stages.length - 1];
     expect(current).toMatchObject({ stage: 'review', open: true, exitedAt: null });
     expect(current.hours).toBeCloseTo(10, 1);
   });
 
   it('flags an open stage already past its SLA as breached', async () => {
-    const tat = await service.forInstance('t1', 'i1');
+    const tat = await service.forInstance('t1', 'i1', staff);
     // 10 hours in a 4-hour stage. Waiting for it to close before admitting the
     // breach would report a clean SLA for exactly as long as it is being missed.
     expect(tat.stages[tat.stages.length - 1].breached).toBe(true);
   });
 
   it('reports a stage with no declared SLA as unknown, not as met', async () => {
-    const tat = await service.forInstance('t1', 'i1');
+    const tat = await service.forInstance('t1', 'i1', staff);
     expect(tat.stages[0].slaHours).toBeNull();
     expect(tat.stages[0].breached).toBeNull();
   });
@@ -89,7 +92,7 @@ describe('TatService', () => {
 
   it('404s an instance belonging to another tenant', async () => {
     repo.findOne.mockResolvedValueOnce(null);
-    await expect(service.forInstance('t2', 'i1')).rejects.toThrow(
+    await expect(service.forInstance('t2', 'i1', staff)).rejects.toThrow(
       /No workflow instance/,
     );
   });

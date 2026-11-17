@@ -242,6 +242,10 @@ export class IntegrationsController {
   }
 
   @Post('vessel/watchlist')
+  // Watchlist and trade WRITES are staff and above (Anton, 2026-11-17). The
+  // READS above and below stay open: GovX shows the `client` role as its
+  // VIEWER user — an open product decision (AGENTS.md §8.1).
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @UseGuards(ModuleEntitlementGuard)
   @RequiresModule(ModuleCode.VESSEL_TRACKING)
   @HttpCode(HttpStatus.CREATED)
@@ -261,6 +265,7 @@ export class IntegrationsController {
   }
 
   @Delete('vessel/watchlist/:id')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @UseGuards(ModuleEntitlementGuard)
   @RequiresModule(ModuleCode.VESSEL_TRACKING)
   @ApiOperation({ summary: 'Stop watching a vessel' })
@@ -302,6 +307,7 @@ export class IntegrationsController {
   }
 
   @Post('trade')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @UseGuards(ModuleEntitlementGuard)
   @RequiresModule(ModuleCode.TRADE_FINANCE)
   @HttpCode(HttpStatus.CREATED)
@@ -322,6 +328,7 @@ export class IntegrationsController {
   }
 
   @Patch('trade/:id')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @UseGuards(ModuleEntitlementGuard)
   @RequiresModule(ModuleCode.TRADE_FINANCE)
   @ApiOperation({
@@ -342,6 +349,7 @@ export class IntegrationsController {
   // PUT alias — separate handler, because stacking verb decorators on one
   // method registers only the last one.
   @Put('trade/:id')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @UseGuards(ModuleEntitlementGuard)
   @RequiresModule(ModuleCode.TRADE_FINANCE)
   @ApiOperation({ summary: 'Update a trade instrument (alias of PATCH)' })
@@ -439,6 +447,9 @@ export class IntegrationsController {
   }
 
   @Post('ae/str')
+  // Filing an STR with a regulator is staff work; this had no @Roles, so a
+  // client token could file one (Anton, 2026-11-17). Same on sa/qa/bh.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiOperation({
     summary: 'AE — File Suspicious Transaction Report via CBUAE',
   })
@@ -506,6 +517,7 @@ export class IntegrationsController {
   }
 
   @Post('sa/str')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiOperation({ summary: 'SA — File Suspicious Transaction Report via SAMA' })
   async saFileSTR(
     @Request() req: AuthenticatedRequest,
@@ -571,6 +583,7 @@ export class IntegrationsController {
   }
 
   @Post('qa/str')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiOperation({ summary: 'QA — File Suspicious Transaction Report via QCB' })
   async qaFileSTR(
     @Request() req: AuthenticatedRequest,
@@ -636,6 +649,7 @@ export class IntegrationsController {
   }
 
   @Post('bh/str')
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiOperation({ summary: 'BH — File Suspicious Transaction Report via CBB' })
   async bhFileSTR(
     @Request() req: AuthenticatedRequest,

@@ -58,6 +58,7 @@ describe('FormBuilderService.getForm — tenant scope', () => {
       unused, // searchService
       unused, // aiService
       unused, // documentHubService
+      unused, // documentAccess
     );
   }
 

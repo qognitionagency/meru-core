@@ -20,6 +20,7 @@ import { BillingModule } from '../billing/billing.module';
 import { RuleEvaluatorModule } from '../rules/rule-evaluator.module';
 import { VerticalPackModule } from '../tenant/vertical-pack.module';
 import { PackWorkflowService } from './services/pack-workflow.service';
+import { CrmAccessService } from '../crm/crm-access.service';
 
 @Module({
   imports: [
@@ -50,11 +51,15 @@ import { PackWorkflowService } from './services/pack-workflow.service';
     VerticalPackModule,
   ],
   controllers: [WorkflowController],
+  // CrmAccessService provided here, as in AnalyticsModule: no dependencies,
+  // no state, and importing CrmModule would pull its forwardRef cycles in
+  // for one predicate. WorkflowEngineService.ownedEntityIds asks it.
   providers: [
     WorkflowEngineService,
     SlaWatchdogService,
     TatService,
     PackWorkflowService,
+    CrmAccessService,
   ],
   exports: [
     WorkflowEngineService,

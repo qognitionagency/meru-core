@@ -1528,3 +1528,41 @@ branch is not a change the portals can see (`/api-json` is the check).
      Specs: `src/iam/services/auth-attempt-limiter.spec.ts`,
      `src/iam/attempt-race.spec.ts`, `src/config/trust-proxy-hops.spec.ts`,
      `src/jobs/job-dispatch-auth-attempts-prune.spec.ts`.
+   - **Client-reachable routes now staff and above** (`staff`, `firm_admin`;
+     **403** to a `client` token). No app calls any of them as a client
+     (meru-core-fe grepped 2026-11-17):
+     - `POST /notifications/templates` → **firm_admin and platform_admin**
+       only (a tenant template overrides the pack template on every firm
+       send); `GET /notifications/templates` → staff and above.
+     - `POST /forms`, `PUT /forms/:id`, `POST /forms/:id/publish`,
+       `POST /forms/:id/version`.
+     - `GET /workflows/tat` (firm-wide aggregate).
+     - `GET /ai/search` and `POST /ai/embeddings`.
+     - `POST /integrations/{ae,sa,qa,bh}/str`, `POST|PATCH|PUT
+       /integrations/trade[/:id]`, `POST|DELETE /integrations/vessel/watchlist`.
+   - **Own-scoped for a non-staff caller (404 when not theirs):**
+     - `POST /forms/:id/submissions` with an `entityId` the caller does not own
+       (assignee or subject email — `DocumentAccessService.assertOwnsEntity`).
+       A client submitting against their own record, or with no `entityId`,
+       is unchanged.
+     - `GET /workflows/instances/:id/tat` — only an instance the caller started
+       or whose record is theirs (the eighth within-tenant read leak). The
+       only caller is the staff matter workspace, so unaffected.
+   - **Open product decision — GovX VIEWER reads.** GovernanceX shows
+     meru-core's `client` role as its `VIEWER` user
+     (`governancex/lib/api/services/users.service.ts`), so `GET
+     /integrations/vessel`, `/vessel/alerts`, `/trade` and `/trade/:id` stay
+     open to a `client` token. GovX is paused; decide before it resumes
+     whether a VIEWER is a client at all. Pinned as-is by
+     `src/integrations/integrations-client-authz.spec.ts`.
+   - **Still client-reachable with no role decision, deliberately not changed
+     here** (the deny-by-default redesign is separate work):
+     `POST /ai/execute` (the ImmiStack client-portal assistant uses it),
+     `POST /ai/analyze-entity/:id` and `GET /ai/prompts` (no app calls
+     either).
+   Specs: `src/notifications/notification-template-authz.spec.ts`,
+   `src/forms/form-authz.spec.ts`, `src/workflow/tat-authz.spec.ts`,
+   `src/ai/ai-client-authz.spec.ts`,
+   `src/integrations/integrations-client-authz.spec.ts`,
+   `src/workflow/workflow-ownership-rule.spec.ts` (internal: workflow
+   ownership now asks `CrmAccessService.applyScope`, no contract change).

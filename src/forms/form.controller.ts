@@ -41,7 +41,9 @@ export class FormController {
    * Copied from `CrmController.actorFrom`.
    */
   private actorFrom(user: UserPayload): Actor {
-    return { id: user.id, roles: user.roles ?? [] };
+    // `email` carries because `own` scope resolves a client's records by
+    // SUBJECT (`DocumentAccessService.assertOwnsEntity`), as in CrmController.
+    return { id: user.id, roles: user.roles ?? [], email: user.email };
   }
 
   /**
@@ -73,6 +75,9 @@ export class FormController {
   @Post()
   @ApiOperation({ summary: 'Create a new form schema' })
   @ApiResponse({ status: 201, description: 'Form created successfully' })
+  // Authoring the firm's forms is staff work; this had no @Roles and a
+  // `client` token could create, rewrite and publish them (Anton, 2026-11-17).
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   async createForm(@Request() req, @Body() dto: CreateFormDto) {
     // The DTO guarantees name, entityType, layout and a fields array. The
     // inner field vocabulary is the vertical's, supplied by a config pack, so
@@ -183,6 +188,8 @@ export class FormController {
     description:
       'Form is published — create a new version via POST /forms/:id/version',
   })
+  // Staff and above, as POST /forms.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   async updateForm(
     @Request() req,
     @Param('id') id: string,
@@ -198,6 +205,7 @@ export class FormController {
   @Post(':id/publish')
   @ApiOperation({ summary: 'Publish a form' })
   @ApiResponse({ status: 200, description: 'Form published' })
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   async publishForm(@Request() req, @Param('id', ParseUUIDPipe) id: string) {
     const form = await this.formService.publishForm(id, req.user.tenantId);
     return form;
@@ -206,6 +214,7 @@ export class FormController {
   @Post(':id/version')
   @ApiOperation({ summary: 'Create new version of form' })
   @ApiResponse({ status: 201, description: 'New version created' })
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   async createNewVersion(
     @Request() req,
     @Param('id', ParseUUIDPipe) id: string,
@@ -228,10 +237,12 @@ export class FormController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: { data: Record<string, any>; entityId?: string },
   ) {
+    // The service asks the one ownership rule for `entityId` (404 on a
+    // record that is not the caller's) — Anton, 2026-11-17.
     const submission = await this.formService.createSubmission(
       id,
       req.user.tenantId,
-      req.user.id,
+      this.actorFrom(req.user),
       dto.data,
       dto.entityId,
     );

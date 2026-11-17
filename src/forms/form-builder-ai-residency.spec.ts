@@ -51,6 +51,7 @@ describe('FormBuilderService — AI residency (tenantId passed top-level)', () =
       unused, // searchService
       aiService as any,
       unused, // documentHubService
+      unused, // documentAccess
     );
 
     return { service, extractFromDocument, validateFormData };

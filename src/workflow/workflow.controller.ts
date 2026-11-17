@@ -123,6 +123,9 @@ export class WorkflowController {
   // ==================== WORKFLOW DEFINITIONS ====================
 
   @Post()
+  // Staff-and-above (Owen's gate, 2026-11-17): this had no @Roles, so a
+  // client token could create a definition. Same pair as `transition`.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiOperation({ summary: 'Create a new workflow definition' })
   @ApiResponse({ status: 201, description: 'Workflow created successfully' })
   @ApiResponse({ status: 400, description: 'Bad request' })
@@ -157,15 +160,21 @@ export class WorkflowController {
   // ==================== WORKFLOW INSTANCES ====================
 
   @Post('instances')
+  // Staff-and-above (Owen's gate, 2026-11-17): this had no @Roles, so a
+  // client token could start an instance on any entity id it named. The
+  // service also asserts ownership of the entity for a caller without
+  // tenant-wide reach, so the rule holds for any future caller.
+  @Roles(PlatformRole.STAFF, PlatformRole.FIRM_ADMIN)
   @ApiOperation({ summary: 'Start a new workflow instance' })
   @ApiResponse({ status: 201, description: 'Instance started' })
+  @ApiResponse({ status: 404, description: 'Entity not found for this caller' })
   async startWorkflow(@Request() req, @Body() dto: StartWorkflowDto) {
     const instance = await this.workflowService.startWorkflow(
       dto.workflowId,
       dto.entityId,
       dto.entityType,
       req.user.tenantId,
-      req.user.id,
+      { id: req.user.id, roles: req.user.roles ?? [], email: req.user.email },
       dto.context,
     );
     return instance;

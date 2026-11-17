@@ -279,9 +279,23 @@ export class WorkflowEngineService {
     entityId: string,
     entityType: string,
     tenantId: string,
-    userId: string,
+    actor: Actor,
     context: Record<string, any> = {},
   ): Promise<WorkflowInstance> {
+    // Owen's gate, 2026-11-17: this started an instance on whatever
+    // `entityId` it was handed. A caller without tenant-wide reach may start
+    // one only on a record they own (assignee or SUBJECT, `ownedEntityIds`
+    // below) — 404, not 403, before anything is read or written. Tenant
+    // scope: `tenantId` from the caller's JWT, RLS, and the explicit
+    // predicate in `ownedEntityIds` and `getWorkflow`.
+    if (!hasTenantWideReach(actor)) {
+      const owned = await this.ownedEntityIds(tenantId, actor);
+      if (!entityId || !owned.includes(entityId)) {
+        throw new NotFoundException('Entity not found');
+      }
+    }
+    const userId = actor.id;
+
     const workflow = await this.getWorkflow(workflowId, tenantId);
 
     if (workflow.status !== WorkflowStatus.ACTIVE) {

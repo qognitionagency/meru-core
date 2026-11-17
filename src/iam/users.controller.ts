@@ -116,7 +116,13 @@ export class UsersController {
     return this.iamService.inviteUser(
       req.user.tenantId,
       dto,
-      { id: req.user.id, name: req.user.email },
+      {
+        id: req.user.id,
+        name: req.user.email,
+        // From the signed `imp` claim only (JwtStrategy) — names the operator
+        // in the audit entry when this is an impersonation session.
+        impersonatedBy: req.user.impersonatedBy,
+      },
       // Ceiling for the requested role — see `canGrantRole` in
       // `platform-role.enum.ts`. Without this a `firm_admin` (admitted by
       // the `@Roles` guard above) could invite themselves a `platform_admin`
@@ -147,6 +153,7 @@ export class UsersController {
     return this.iamService.resendInvite(req.user.tenantId, id, {
       id: req.user.id,
       name: req.user.email,
+      impersonatedBy: req.user.impersonatedBy,
     });
   }
 
@@ -189,6 +196,7 @@ export class UsersController {
       id: req.user.id,
       roles: req.user.roles,
       email: req.user.email,
+      impersonatedBy: req.user.impersonatedBy,
     });
   }
 

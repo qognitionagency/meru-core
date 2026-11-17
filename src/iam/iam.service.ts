@@ -6,6 +6,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 // IsNull() is mandatory for "column IS NULL" in find options. A bare
@@ -59,6 +60,39 @@ export interface SessionContext {
   /** Which product opened it: `immistack`, `meru-dashboard`, `governancex`. */
   client?: string;
 }
+
+/** The operator behind an impersonation token — `UserPayload.impersonatedBy`. */
+type ImpersonatedBy = NonNullable<UserPayload['impersonatedBy']>;
+
+/** An entry for `IamService.audit` / `auditStrict`. */
+type IamAuditEntry = Omit<
+  Parameters<AuditService['logEvent']>[0],
+  'severity'
+> & {
+  severity?: AuditSeverity;
+  /** Set when the caller holds an impersonation token; lands in `context`. */
+  impersonatedBy?: ImpersonatedBy;
+};
+
+/**
+ * One change recorded by `IamService.auditedChange`: the fields its three
+ * possible rows share, and what each row says. `event` lands in
+ * `context.event` — `AuditAction` is a Postgres enum, and a value per phase
+ * would need a migration for no query that `context.event` cannot serve.
+ */
+interface AuditedStep {
+  /** Tenant, actor, entity, severity, before/after — shared by every phase. */
+  base: Omit<IamAuditEntry, 'action' | 'description'>;
+  /** Written strictly BEFORE the change. Worded as a request, never a fact. */
+  requested: { event: string; description: string };
+  /** Written after the change succeeded. The only row that states a fact. */
+  applied: { event: string; description: string; action?: AuditAction };
+  /** Written if the change failed after its request row was written. */
+  notApplied: { event: string; description: string };
+}
+
+/** Why a requested change did not take effect — `context.reason`. */
+type NotAppliedReason = 'audit_unavailable' | 'no_row_updated' | 'write_failed';
 
 /**
  * FR-1.2 — the practitioner credential is a PAIR: a number and the register it
@@ -128,27 +162,158 @@ export class IamService {
    * own post-commit audit write (`tenant-provisioning.service.ts`).
    *
    * **Role change and status change are the other two, and they do NOT use
-   * this helper.** They are privilege and account-standing changes, audited
-   * BEFORE the save and never swallowed — `updateUser`'s own comment at its
-   * two `auditService.logEvent` calls explains why: `TenancyService.runAsGod`'s
-   * write-before-and-rethrow discipline (CLAUDE.md §5.4), not this one.
+   * this helper for their pre-change row.** They are privilege and
+   * account-standing changes, recorded through `auditedChange`: a strict
+   * request row BEFORE the save, never swallowed — `TenancyService.runAsGod`'s
+   * write-before-and-rethrow discipline (CLAUDE.md §5.4) — and this helper
+   * only for the outcome row written after it.
    */
-  private async audit(
-    entry: Omit<Parameters<AuditService['logEvent']>[0], 'severity'> & {
-      severity?: AuditSeverity;
-    },
-  ): Promise<void> {
+  private async audit(entry: IamAuditEntry): Promise<void> {
     try {
-      await this.auditService.logEvent({
-        severity: AuditSeverity.INFO,
-        ...entry,
-      });
+      await this.auditService.logEvent(this.toAuditEvent(entry));
     } catch (err: unknown) {
       this.logger.error(
         `Failed to write audit entry (${entry.action} on ${entry.entityType} ${entry.entityId}): ` +
           (err instanceof Error ? err.message : String(err)),
       );
     }
+  }
+
+  /**
+   * Strict audit write: call BEFORE the state change; a failure refuses it.
+   *
+   * Answers **503** "Audit log unavailable — change refused" rather than
+   * letting the driver error surface as an opaque 500 `MER-SRV-0001`: the
+   * request was valid, the dependency was not there, and the client should
+   * retry. The underlying error is logged, never returned.
+   *
+   * Only `auditedChange` calls this.
+   */
+  private async auditStrict(entry: IamAuditEntry): Promise<void> {
+    try {
+      await this.auditService.logEvent(this.toAuditEvent(entry));
+    } catch (err: unknown) {
+      this.logger.error(
+        `Strict audit write failed (${String(entry.context?.event ?? entry.action)} ` +
+          `on ${entry.entityType} ${entry.entityId}); change refused: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      throw new ServiceUnavailableException(
+        'Audit log unavailable — change refused',
+      );
+    }
+  }
+
+  /**
+   * Record a security-posture change as request → change → outcome.
+   *
+   * For changes where an unrecorded change is worse than a refused one: MFA
+   * on, MFA off (removing the second factor is the first thing a stolen token
+   * is used for), role and status (privilege and account standing).
+   *
+   * 1. Each step's `requested` row is written strictly, BEFORE the change.
+   *    If any cannot be written: 503, nothing changes, and any request rows
+   *    already written are answered with `not_applied` (best-effort).
+   * 2. `change()` runs.
+   * 3. Success → each step's `applied` row, best-effort. The change has
+   *    happened; failing the request now would tell the caller it had not.
+   *    The request row already exists, so it is not unrecorded.
+   *    Any failure → each step's `notApplied` row, best-effort, then the
+   *    ORIGINAL error is rethrown. A `NotFoundException` from `change()` is
+   *    read as "matched no row"; anything else as "write failed".
+   *
+   * So no row ever states as fact a change that did not happen: a request
+   * row with neither outcome after it means the process died mid-change, and
+   * the user's current state is the answer.
+   *
+   * Not one SQL transaction: `AuditService.logEvent` uses its own injected
+   * repository and accepts no caller `EntityManager`, and widening that for
+   * every module that audits is a larger change than this one.
+   */
+  private async auditedChange<T>(
+    steps: AuditedStep[],
+    change: () => Promise<T>,
+  ): Promise<T> {
+    const requested: AuditedStep[] = [];
+    for (const step of steps) {
+      try {
+        await this.auditStrict({
+          ...step.base,
+          action: AuditAction.UPDATE,
+          description: step.requested.description,
+          context: {
+            ...(step.base.context ?? {}),
+            event: step.requested.event,
+          },
+        });
+      } catch (err) {
+        await this.recordNotApplied(requested, 'audit_unavailable');
+        throw err;
+      }
+      requested.push(step);
+    }
+
+    let result: T;
+    try {
+      result = await change();
+    } catch (err) {
+      await this.recordNotApplied(
+        steps,
+        err instanceof NotFoundException ? 'no_row_updated' : 'write_failed',
+      );
+      throw err;
+    }
+
+    for (const step of steps) {
+      await this.audit({
+        ...step.base,
+        action: step.applied.action ?? AuditAction.UPDATE,
+        description: step.applied.description,
+        context: { ...(step.base.context ?? {}), event: step.applied.event },
+      });
+    }
+    return result;
+  }
+
+  /** Best-effort `not_applied` rows for `auditedChange`. Never throws. */
+  private async recordNotApplied(
+    steps: AuditedStep[],
+    reason: NotAppliedReason,
+  ): Promise<void> {
+    for (const step of steps) {
+      await this.audit({
+        ...step.base,
+        action: AuditAction.UPDATE,
+        severity: AuditSeverity.WARNING,
+        description: step.notApplied.description,
+        context: {
+          ...(step.base.context ?? {}),
+          event: step.notApplied.event,
+          reason,
+        },
+      });
+    }
+  }
+
+  /**
+   * Shape an IAM entry for `AuditService.logEvent`. An impersonated caller's
+   * operator goes into `context.impersonatedBy`: the row's `userId` is the
+   * user being impersonated, so without this the log would say the customer
+   * did what a platform operator did (CLAUDE.md §5.4). Only ever sourced from
+   * `req.user.impersonatedBy`, which `JwtStrategy` sets from the signed `imp`
+   * claim and never from request input.
+   */
+  private toAuditEvent({
+    impersonatedBy,
+    ...entry
+  }: IamAuditEntry): Parameters<AuditService['logEvent']>[0] {
+    return {
+      severity: AuditSeverity.INFO,
+      ...entry,
+      ...(impersonatedBy
+        ? { context: { ...(entry.context ?? {}), impersonatedBy } }
+        : {}),
+    };
   }
 
   // ─── Authentication ──────────────────────────────────────────────
@@ -420,7 +585,7 @@ export class IamService {
   async verifyMfaSetup(userId: string, token: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
-      select: ['id', 'mfaSecret', 'mfaEnabled'],
+      select: ['id', 'tenantId', 'email', 'mfaSecret', 'mfaEnabled'],
     });
 
     if (!user || !user.mfaSecret)
@@ -429,8 +594,38 @@ export class IamService {
     const isValid = authenticator.check(token, user.mfaSecret);
     if (!isValid) throw new BadRequestException('Invalid verification code');
 
-    user.mfaEnabled = true;
-    await this.userRepo.save(user);
+    // Request row strictly before the save; outcome row after (auditedChange).
+    // Tenant scope of the audit rows: the user row's own `tenantId`, which RLS
+    // (TenantBindingInterceptor) already confined the lookup above to.
+    await this.auditedChange(
+      [
+        {
+          base: {
+            tenantId: user.tenantId,
+            userId: user.id,
+            userEmail: user.email,
+            entityType: 'user',
+            entityId: user.id,
+          },
+          requested: {
+            event: 'mfa.enable.requested',
+            description: `MFA enable requested for ${user.email}`,
+          },
+          applied: {
+            event: 'mfa.enabled',
+            description: `MFA enabled for ${user.email}`,
+          },
+          notApplied: {
+            event: 'mfa.enable.not_applied',
+            description: `MFA enable for ${user.email} did not take effect`,
+          },
+        },
+      ],
+      async () => {
+        user.mfaEnabled = true;
+        await this.userRepo.save(user);
+      },
+    );
     return { success: true };
   }
 
@@ -510,11 +705,65 @@ export class IamService {
     };
   }
 
-  async disableMfa(userId: string) {
-    await this.userRepo.update(userId, {
-      mfaEnabled: false,
-      mfaSecret: null as any,
+  /**
+   * Turn MFA off — only with a valid current TOTP code.
+   *
+   * Without the code, any holder of an access token (stolen, or reachable
+   * through XSS) could strip the second factor permanently and silently.
+   * Tenant scope: the caller's own `tenantId` from the validated token, in the
+   * WHERE clause as well as through RLS (bound by TenantBindingInterceptor).
+   * Zero rows affected is a 404, never a `{success: true}` that did not happen.
+   */
+  async disableMfa(tenantId: string, userId: string, token: string) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId, tenantId },
+      select: ['id', 'tenantId', 'email', 'mfaSecret', 'mfaEnabled'],
     });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.mfaEnabled || !user.mfaSecret) {
+      throw new BadRequestException('MFA is not enabled');
+    }
+    if (!authenticator.check(token, user.mfaSecret)) {
+      throw new UnauthorizedException('Invalid MFA token');
+    }
+
+    // Request row strictly before the update — if it cannot be written the
+    // second factor stays on — and the outcome row after (auditedChange).
+    await this.auditedChange(
+      [
+        {
+          base: {
+            tenantId,
+            userId: user.id,
+            userEmail: user.email,
+            entityType: 'user',
+            entityId: user.id,
+            severity: AuditSeverity.WARNING,
+          },
+          requested: {
+            event: 'mfa.disable.requested',
+            description: `MFA disable requested for ${user.email}`,
+          },
+          applied: {
+            event: 'mfa.disabled',
+            description: `MFA disabled for ${user.email}`,
+          },
+          notApplied: {
+            event: 'mfa.disable.not_applied',
+            description: `MFA disable for ${user.email} did not take effect`,
+          },
+        },
+      ],
+      async () => {
+        // Tenant scope: `{ id, tenantId }` in the WHERE clause, and RLS.
+        const res = await this.userRepo.update(
+          { id: user.id, tenantId },
+          { mfaEnabled: false, mfaSecret: null as any },
+        );
+        // Zero rows is a 404, never a `{success: true}` that did not happen.
+        if (res.affected !== 1) throw new NotFoundException('User not found');
+      },
+    );
     return { success: true };
   }
 
@@ -814,7 +1063,9 @@ export class IamService {
       practitionerCredential?: string;
       practitionerCredentialType?: string;
     },
-    invitedBy: { id: string; name: string } | undefined,
+    invitedBy:
+      | { id: string; name: string; impersonatedBy?: ImpersonatedBy }
+      | undefined,
     actorRoles: string[],
   ): Promise<
     DirectoryUser & { inviteSent: boolean; inviteUrl: string }
@@ -916,6 +1167,7 @@ export class IamService {
       description: `Invited ${user.email} as '${requestedRole}'`,
       afterState: { email: user.email, role: requestedRole, status: user.status },
       context: { inviteSent: delivered },
+      impersonatedBy: invitedBy?.impersonatedBy,
     });
 
     // `inviteUrl` travels with the result for the same reason `resendInvite`
@@ -976,7 +1228,12 @@ export class IamService {
   async resendInvite(
     tenantId: string,
     userId: string,
-    invitedBy?: { id: string; name: string; auditEmail?: string },
+    invitedBy?: {
+      id: string;
+      name: string;
+      auditEmail?: string;
+      impersonatedBy?: ImpersonatedBy;
+    },
   ): Promise<{
     email: string;
     inviteSent: boolean;
@@ -1036,6 +1293,7 @@ export class IamService {
       entityId: user.id,
       description: `Re-invited ${user.email}`,
       context: { inviteSent: delivered },
+      impersonatedBy: invitedBy?.impersonatedBy,
     });
 
     return {
@@ -1091,7 +1349,7 @@ export class IamService {
       practitionerCredential?: string;
       practitionerCredentialType?: string;
     },
-    actor: Actor,
+    actor: Actor & { impersonatedBy?: ImpersonatedBy },
   ): Promise<DirectoryUser> {
     const isSelf = actor.id === userId;
     const isAdmin = actor.roles.some(
@@ -1188,18 +1446,15 @@ export class IamService {
     // `firm_admin` silently promoting a colleague to `platform_admin` with no
     // recoverable trace is worse than refusing the promotion outright.
     //
-    // Written BEFORE `userRepo.save`, and never swallowed: if the
-    // hash-chained row cannot be written, the change must not take effect
-    // either. This is `TenancyService.runAsGod`'s own discipline (audit
-    // first, rethrow on failure), chosen deliberately over a single SQL
-    // transaction spanning both writes — `AuditService.logEvent` uses its own
-    // injected `Repository<AuditLog>` and accepts no external
-    // `EntityManager`/`QueryRunner`, so making it participate in a caller's
-    // transaction would mean widening that contract for every other module
-    // that calls it (billing, CRM, workflow, documents…), not just this one
-    // call site. Audit-before-and-rethrow gets the same real guarantee — a
-    // failed audit write leaves nothing persisted, because nothing has been
-    // saved yet — without that broader change.
+    // So each is recorded through `auditedChange`: a strict request row
+    // (`role.change.requested` / `status.change.requested`, on UPDATE)
+    // BEFORE `userRepo.save`, never swallowed — if it cannot be written the
+    // change does not happen (503). This is `TenancyService.runAsGod`'s own
+    // discipline (audit first, rethrow on failure). ROLE_CHANGED /
+    // STATUS_CHANGED themselves are written only AFTER the save succeeds, so a
+    // compliance query on those actions returns changes that happened; a
+    // failed save leaves `*.not_applied` instead. `auditedChange`'s own
+    // comment says why this is not one SQL transaction.
     //
     // A consequence worth stating plainly: if this request ALSO changed
     // `firstName`/`department`/the practitioner credential in the same call,
@@ -1208,37 +1463,68 @@ export class IamService {
     // privilege change. That is the correct "all or nothing" shape for a
     // request that touches a privilege field — there is no partial-success
     // response that would be honest here.
+    //
+    // Tenant scope of every row: `tenantId` from the caller's validated token,
+    // the same tenant `findOne({ id, tenantId })` above loaded the user from.
+    const steps: AuditedStep[] = [];
+    const actorFields = {
+      tenantId,
+      userId: actor.id,
+      userEmail: actor.email,
+      impersonatedBy: actor.impersonatedBy,
+      entityType: 'user',
+      entityId: user.id,
+      severity: AuditSeverity.INFO,
+    };
     if (updates.role !== undefined && updates.role !== previousRole) {
-      await this.auditService.logEvent({
-        tenantId,
-        userId: actor.id,
-        userEmail: actor.email,
-        action: AuditAction.ROLE_CHANGED,
-        entityType: 'user',
-        entityId: user.id,
-        description: `Role changed for ${user.email}: ${previousRole} → ${updates.role}`,
-        severity: AuditSeverity.INFO,
-        beforeState: { role: previousRole },
-        afterState: { role: updates.role },
+      const change = `${previousRole} → ${updates.role}`;
+      steps.push({
+        base: {
+          ...actorFields,
+          beforeState: { role: previousRole },
+          afterState: { role: updates.role },
+        },
+        requested: {
+          event: 'role.change.requested',
+          description: `Role change requested for ${user.email}: ${change}`,
+        },
+        applied: {
+          event: 'role.changed',
+          action: AuditAction.ROLE_CHANGED,
+          description: `Role changed for ${user.email}: ${change}`,
+        },
+        notApplied: {
+          event: 'role.change.not_applied',
+          description: `Role change for ${user.email} did not take effect: ${change}`,
+        },
       });
     }
 
     if (updates.status !== undefined && updates.status !== previousStatus) {
-      await this.auditService.logEvent({
-        tenantId,
-        userId: actor.id,
-        userEmail: actor.email,
-        action: AuditAction.STATUS_CHANGED,
-        entityType: 'user',
-        entityId: user.id,
-        description: `Status changed for ${user.email}: ${previousStatus} → ${updates.status}`,
-        severity: AuditSeverity.INFO,
-        beforeState: { status: previousStatus },
-        afterState: { status: updates.status },
+      const change = `${previousStatus} → ${updates.status}`;
+      steps.push({
+        base: {
+          ...actorFields,
+          beforeState: { status: previousStatus },
+          afterState: { status: updates.status },
+        },
+        requested: {
+          event: 'status.change.requested',
+          description: `Status change requested for ${user.email}: ${change}`,
+        },
+        applied: {
+          event: 'status.changed',
+          action: AuditAction.STATUS_CHANGED,
+          description: `Status changed for ${user.email}: ${change}`,
+        },
+        notApplied: {
+          event: 'status.change.not_applied',
+          description: `Status change for ${user.email} did not take effect: ${change}`,
+        },
       });
     }
 
-    await this.userRepo.save(user);
+    await this.auditedChange(steps, () => this.userRepo.save(user));
 
     return this.toDirectoryUser(user);
   }

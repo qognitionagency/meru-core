@@ -607,6 +607,40 @@ behind upload), `@nestjs/core@11.1.12` (output-injection range), `typeorm@0.3.28
 (MySQL-specific SQLi advisory, lower practical risk on Postgres). All fixable by
 a version bump; re-run `check:cjs` and the full suite after each.
 
+### 2.3 Document encryption — known defects, not fixed here (2026-11-17)
+
+Anton's sign-off found the platform `DOCUMENT_ENCRYPTION_KEY` stored in clear in
+`document_versions."encryptionKey"` and returned by the version read routes. That
+leak is closed on `wave0/back-online`, **uncommitted, not deployed**: the key is no
+longer written, the column is `select: false`, the three read paths map it out
+(`toVersionView`, `src/documents/documents.service.ts`), and migration
+`1757400000000-NullDocumentVersionEncryptionKeys` NULLs the stored copies (**not
+yet run; one-way — `down()` restores nothing**). It refuses to run under a role
+without BYPASSRLS — `document_versions` has FORCE RLS, so under `meru_app` the
+UPDATE would match nothing and report success — and throws if any key is still
+stored afterwards. Run it as the owner role (`DATABASE_URL`). Spec:
+`src/documents/document-version-key.spec.ts`.
+
+**Treat the key as exposed.** Any authenticated user who could read one encrypted
+document could read it back. **It cannot be rotated safely yet** — see the first
+row below.
+
+The wider design is broken, and that redesign was deliberately **not** started:
+
+| Defect | Where | Consequence |
+|---|---|---|
+| One platform-wide key, no key identifier per version | `DocumentsService.encryptFile` (key from `getEncryptionKey`); `DocumentVersion` has no key-id column | Every tenant's encrypted documents are under one key. Rotating `DOCUMENT_ENCRYPTION_KEY` orphans every file encrypted under the old one, because nothing records which key a version used. Needs per-tenant envelope keys plus a key id on the version |
+| **Encrypted documents cannot be read back through the product** | `DocumentsService.decryptFile` has **no caller**; `DocumentsService.downloadUrl` returns `StorageService.signedReadUrl` for the stored object as-is | A `standard`/`high` document downloads as ciphertext (`iv ‖ authTag ‖ data`). No route decrypts |
+| Key derivation mismatch | `encryptFile` derives `scryptSync(secret, 'salt', 32)`; `decryptFile` expects `Buffer.from(key, 'base64')` | Even wired up, decryption with the configured secret would not reproduce the encryption key |
+| Literal salt | `encryptFile`'s `scryptSync` call — the constant string `'salt'` | The salt adds nothing. A fixed salt has to be a migration with the key-id work, or existing files become unreadable |
+| The presigned-upload path never encrypts | `DocumentsService.create` writes `encryption: DocumentEncryption.NONE` and copies the caller's `requiredEncryption` | Bytes go browser → bucket, and the server never sees them. A document "requiring" encryption is stored in plaintext; a later `DocumentsService.createNewVersion` on it **does** encrypt (it calls `encryptFile`), so one document can hold mixed plaintext and ciphertext versions |
+
+Today the literal key fallbacks are gone (`getEncryptionKey` is `getOrThrow`;
+`configuration().documents.encryptionKey` no longer exists). The only committed
+default left is the Joi non-production default in `src/config/configuration.ts`,
+which production refuses at boot **only when `NODE_ENV=production`**. A production
+host without that variable would encrypt under it.
+
 ---
 
 ## 3. Shipped, and what each one actually fixed
@@ -1140,3 +1174,115 @@ Rules the frontends hold to, which the API must keep making possible:
 Modules the frontend deliberately does **not** want to call directly: `Storage`
 (`/documents` wraps it), `Elasticsearch` (`/search` is the right altitude),
 `Queue` (`/jobs/status` covers the need).
+
+### 8.1 Contract changes handed to the frontend
+
+Dated, newest last. Each entry says whether it has deployed — a change on a
+branch is not a change the portals can see (`/api-json` is the check).
+
+1. **2026-11-17 — `POST /auth/mfa/disable` now requires `{ token }`.**
+   *Not deployed* — uncommitted on `wave0/back-online`.
+   - **Body:** `{ "token": "<six-digit TOTP>" }` (`VerifyMfaSetupDto`, exactly
+     6 characters). It took no body before. No/malformed body → **400**
+     `MER-VAL-*`; MFA not enabled → **400**; wrong code → **401**
+     `MER-AUTH-0001` (`IamService.disableMfa`).
+   - **Latent consumer:** `disableMfa()` in
+     `meru-core-fe/governancex/lib/api/services/auth.service.ts` — as committed,
+     it posts no body and will 400 once this ships. Nothing
+     calls it today (grepped all three apps 2026-11-17; immistack and
+     meru-dashboard have no caller at all), so no live screen breaks. Whoever
+     wires it must collect a code first.
+   - **Trap for that wiring:** a wrong code is a 401, and governancex
+     `lib/api/client.ts` refreshes on any 401 outside `/auth/login|refresh|logout`.
+     A typo therefore spends a refresh and replays the same code once before
+     the error surfaces. Add `/auth/mfa/` to `isAuthEndpoint`.
+   - **Frontend status (2026-11-17, re-read):** the meru-core-fe working tree
+     already has both — `disableMfa(token)` sends `{ token }` and
+     `isAuthEndpoint` in `lib/api/client.ts` exempts `/auth/mfa/`. **Uncommitted
+     there, not deployed.**
+   - **New on every authenticated route** (`jwt.strategy.ts`): the session
+     check now fails **closed**. If the session row cannot be read, the request
+     answers **503** `MER-SRV-0002` "Session could not be verified" instead of
+     being let through. Treat it as retry, never as logout — governancex's
+     interceptor already passes a 503 through without refreshing. Separately, a
+     token with no `sid` that is not an impersonation token (`imp`) is now a
+     **401**, including the MFA challenge token used as a Bearer.
+
+2. **2026-11-17 — `GET /auth/saml/initiate` and `POST /auth/saml/callback`
+   answer HTTP 501.** *Not deployed* — uncommitted on `wave0/back-online`.
+   - SAML SSO is disabled unconditionally (`SamlService.assertSamlAvailable`,
+     spec `src/iam/saml-disabled.spec.ts`): **501** `NotImplementedException`,
+     "SAML SSO is disabled pending a library-backed implementation". There is
+     no flag to turn it back on.
+   - **Live consumer (Owen's FIX):** the "Continue with SSO" button's
+     `onClick` in `meru-core-fe/governancex/app/[locale]/(auth)/login/page.tsx`.
+     The button prompts for an organisation id and does a
+     full-page navigation to `samlInitiateUrl(slug)`. After this ships, that
+     lands the user on a raw 501 JSON envelope, not a login. Hide or disable
+     the SSO button, or call the URL with `fetch` first and show the 501
+     message, before or alongside the backend deploy.
+   - **Frontend status (2026-11-17, re-read):** the meru-core-fe working tree
+     renders that button only when `SAML_SSO_AVAILABLE`
+     (`lib/api/services/auth.service.ts`) is true, and it is `false`.
+     **Uncommitted there, not deployed.**
+
+3. **2026-11-17 — document version payloads no longer contain
+   `encryptionKey`.** *Not deployed* — uncommitted on `wave0/back-online`.
+   - Affects `GET /documents/:id` (`versions[]`), `GET /documents/:id/versions`,
+     `GET /documents/:id/versions/:versionId`, the `version` in the
+     `POST /documents/upload` and new-version responses, and every route that
+     loads documents with their versions through `DocumentHubService` (for
+     example `GET /crm/entities/:id/documents`). The property is **absent**,
+     not `null`. `encryptionAlgorithm` is unchanged and remains the "this file
+     is encrypted" marker.
+   - **Consumers:** none. Grepped all three apps on 2026-11-17 and found no
+     reader of `encryptionKey`. Nothing to change. Detail: §2.3.
+
+4. **2026-11-17 — impersonation tokens are refused (403) on the account
+   holder's own security routes.** *Not deployed* — uncommitted on
+   `wave0/back-online`.
+   - `POST /auth/mfa/setup`, `POST /auth/mfa/setup/verify`,
+     `POST /auth/mfa/disable`, `POST /auth/logout-all`,
+     `DELETE /auth/sessions/:id` **and `GET /auth/sessions`** (it is the
+     user's own device list, with IPs and user agents, and it hands out the ids
+     DELETE takes). A token carrying `imp` gets **403** `MER-AUTH-0008`.
+     Ordinary sessions are unaffected. Guard:
+     `src/iam/guards/no-impersonation.guard.ts`. Spec:
+     `src/iam/impersonation-refusal.spec.ts`.
+   - **Consumers:** only `meru-dashboard` holds impersonation tokens
+     (`lib/api/impersonation.ts`, sessionStorage), and it calls none of these
+     routes (grepped 2026-11-17). governancex (`lib/api/services/auth.service.ts`)
+     and immistack (`lib/api/services/profile.service.ts`) call them with the
+     user's own session, so nothing changes for them. If any of those screens is
+     ever reachable under impersonation, render the 403 as "not available while
+     impersonating", not as an error. A 403 does not trigger a token refresh in
+     either client.
+   - **Audit:** IAM audit entries written during an impersonation session
+     (invite issue, invite resend, role and status change) now carry
+     `context.impersonatedBy: { operatorId, operatorTenantId }`. That is data
+     only; no response shape changes.
+
+5. **2026-11-17 — a security-posture change answers 503 when it cannot be
+   audited.** *Not deployed* — uncommitted on `wave0/back-online`.
+   - `POST /auth/mfa/setup/verify`, `POST /auth/mfa/disable`, and
+     `PATCH /iam/users/:id` when it changes `role` or `status`: if the
+     `audit_logs` row cannot be written, the change is refused with **503**
+     `MER-SRV-0002` "Audit log unavailable — change refused". It used to be an
+     opaque **500** `MER-SRV-0001`. Nothing changed; treat it as retry, never
+     as a validation error. (`IamService.auditStrict`.)
+   - **Audit rows (data only):** each of those changes now writes a
+     `*.requested` row (`AuditAction.UPDATE`) before the change, then either
+     the completed fact — `mfa.enabled` / `mfa.disabled` on UPDATE,
+     `ROLE_CHANGED` / `STATUS_CHANGED` — or `*.not_applied` with
+     `context.reason` (`audit_unavailable` | `no_row_updated` |
+     `write_failed`). `ROLE_CHANGED` / `STATUS_CHANGED` now only ever mean the
+     change happened. A `*.requested` row with neither outcome after it means
+     the process died mid-change; the user's current state is the answer.
+     (`IamService.auditedChange`.)
+   - **Consumers (grepped all three apps 2026-11-17):** only immistack's
+     `settings/audit` page reads these rows, through `AUDIT_ACTION_LABELS` in
+     `lib/api/services/audit.service.ts`, and it shows `description`. A role
+     change now lists as an "Update" row reading "Role change requested for …"
+     followed by a "Role changed" row, and filtering on "Role changed" returns
+     only changes that happened. No code change needed. No app handles a
+     503 on these routes specifically yet.

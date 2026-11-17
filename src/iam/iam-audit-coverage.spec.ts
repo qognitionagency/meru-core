@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import { IamService } from './iam.service';
 import { PlatformRole } from './enums/platform-role.enum';
 import { UserStatus } from './entities/user.entity';
@@ -437,7 +438,7 @@ describe('IamService — IAM audit coverage', () => {
 
       await expect(
         service.updateUser(T, 'u1', { role: PlatformRole.FIRM_ADMIN }, ADMIN),
-      ).rejects.toThrow('audit table unavailable');
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
       // Nothing persisted — the audit write happens BEFORE the save.
       expect(userRepo.save).not.toHaveBeenCalled();
@@ -453,7 +454,7 @@ describe('IamService — IAM audit coverage', () => {
 
       await expect(
         service.updateUser(T, 'u1', { status: UserStatus.INACTIVE }, ADMIN),
-      ).rejects.toThrow('audit table unavailable');
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
       expect(userRepo.save).not.toHaveBeenCalled();
       expect(users[0].status).toBe(UserStatus.ACTIVE);
@@ -475,10 +476,132 @@ describe('IamService — IAM audit coverage', () => {
           { role: PlatformRole.FIRM_ADMIN, firstName: 'Renamed' },
           ADMIN,
         ),
-      ).rejects.toThrow('audit table unavailable');
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
       expect(userRepo.save).not.toHaveBeenCalled();
       expect(users[0].firstName).toBe('Original');
+    });
+
+    /**
+     * Owen's gate: the strict pre-save row used to BE the ROLE_CHANGED /
+     * STATUS_CHANGED row. If `userRepo.save` then threw, that row stood as a
+     * fact about a change that never happened. Now the pre-save row is a
+     * REQUEST (`AuditAction.UPDATE`, `context.event: 'role.change.requested'`),
+     * ROLE_CHANGED / STATUS_CHANGED are written only once the save has
+     * succeeded, and a failed save leaves `*.not_applied` instead.
+     */
+    describe('intent first, then the outcome', () => {
+      it('writes the request before the save and ROLE_CHANGED only after it', async () => {
+        const { service, users, auditEvents, auditService, userRepo } = build();
+        seed(users, { id: 'u1', roles: [PlatformRole.STAFF] });
+
+        await service.updateUser(T, 'u1', { role: PlatformRole.FIRM_ADMIN }, ADMIN);
+
+        expect(auditEvents.map((e) => e.context?.event ?? e.action)).toEqual([
+          'role.change.requested',
+          'role.changed',
+        ]);
+        const [requested, changed] = auditEvents;
+        expect(requested).toMatchObject({
+          action: AuditAction.UPDATE,
+          entityId: 'u1',
+          beforeState: { role: PlatformRole.STAFF },
+          afterState: { role: PlatformRole.FIRM_ADMIN },
+        });
+        expect(requested.description).toMatch(/requested/i);
+        expect(changed.action).toBe(AuditAction.ROLE_CHANGED);
+
+        const saveOrder = userRepo.save.mock.invocationCallOrder[0];
+        const [reqOrder, doneOrder] = auditService.logEvent.mock.invocationCallOrder;
+        expect(reqOrder).toBeLessThan(saveOrder);
+        expect(doneOrder).toBeGreaterThan(saveOrder);
+      });
+
+      it('if the save THROWS, writes role.change.not_applied, no ROLE_CHANGED, and rethrows', async () => {
+        const { service, users, auditEvents, userRepo } = build();
+        seed(users, { id: 'u1', roles: [PlatformRole.STAFF] });
+        const dropped = new Error('Connection terminated unexpectedly');
+        userRepo.save.mockRejectedValueOnce(dropped);
+
+        await expect(
+          service.updateUser(T, 'u1', { role: PlatformRole.FIRM_ADMIN }, ADMIN),
+        ).rejects.toBe(dropped);
+
+        expect(auditEvents.map((e) => e.context?.event)).toEqual([
+          'role.change.requested',
+          'role.change.not_applied',
+        ]);
+        expect(auditEvents[1].context).toMatchObject({ reason: 'write_failed' });
+        expect(
+          auditEvents.filter((e) => e.action === AuditAction.ROLE_CHANGED),
+        ).toHaveLength(0);
+      });
+
+      it('if the save THROWS on a status change, writes status.change.not_applied and no STATUS_CHANGED', async () => {
+        const { service, users, auditEvents, userRepo } = build();
+        seed(users, { id: 'u1', status: UserStatus.ACTIVE });
+        const timeout = new Error('Query read timeout');
+        userRepo.save.mockRejectedValueOnce(timeout);
+
+        await expect(
+          service.updateUser(T, 'u1', { status: UserStatus.INACTIVE }, ADMIN),
+        ).rejects.toBe(timeout);
+
+        expect(auditEvents.map((e) => e.context?.event)).toEqual([
+          'status.change.requested',
+          'status.change.not_applied',
+        ]);
+        expect(
+          auditEvents.filter((e) => e.action === AuditAction.STATUS_CHANGED),
+        ).toHaveLength(0);
+      });
+
+      it('if the SECOND intent cannot be written, the first is marked not_applied and nothing is saved', async () => {
+        const { service, users, auditEvents, auditService, userRepo } = build();
+        seed(users, {
+          id: 'u1',
+          roles: [PlatformRole.STAFF],
+          status: UserStatus.ACTIVE,
+        });
+        // First call (role intent) succeeds via the default impl; second
+        // (status intent) fails.
+        const realImpl = auditService.logEvent.getMockImplementation()!;
+        auditService.logEvent
+          .mockImplementationOnce(realImpl)
+          .mockRejectedValueOnce(new Error('audit table unavailable'));
+
+        await expect(
+          service.updateUser(
+            T,
+            'u1',
+            { role: PlatformRole.FIRM_ADMIN, status: UserStatus.INACTIVE },
+            ADMIN,
+          ),
+        ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+        expect(userRepo.save).not.toHaveBeenCalled();
+        expect(auditEvents.map((e) => e.context?.event)).toEqual([
+          'role.change.requested',
+          'role.change.not_applied',
+        ]);
+        expect(auditEvents[1].context).toMatchObject({
+          reason: 'audit_unavailable',
+        });
+      });
+
+      it('a failed ROLE_CHANGED completion write does not fail a role change that happened', async () => {
+        const { service, users, auditService } = build();
+        seed(users, { id: 'u1', roles: [PlatformRole.STAFF] });
+        const realImpl = auditService.logEvent.getMockImplementation()!;
+        auditService.logEvent
+          .mockImplementationOnce(realImpl)
+          .mockRejectedValueOnce(new Error('audit table unavailable'));
+
+        await expect(
+          service.updateUser(T, 'u1', { role: PlatformRole.FIRM_ADMIN }, ADMIN),
+        ).resolves.toMatchObject({ role: PlatformRole.FIRM_ADMIN });
+        expect(users[0].roles).toEqual([PlatformRole.FIRM_ADMIN]);
+      });
     });
 
     it('a status-change audit failure does not block a SEPARATE, later request from succeeding', async () => {
@@ -491,7 +614,7 @@ describe('IamService — IAM audit coverage', () => {
 
       await expect(
         service.updateUser(T, 'u1', { status: UserStatus.INACTIVE }, ADMIN),
-      ).rejects.toThrow('audit table unavailable');
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
       expect(userRepo.save).not.toHaveBeenCalled();
 
       await service.updateUser(T, 'u1', { status: UserStatus.INACTIVE }, ADMIN);

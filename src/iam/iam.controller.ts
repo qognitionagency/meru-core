@@ -27,6 +27,7 @@ import type { Response } from 'express';
 import { IamService } from './iam.service';
 import { SamlService } from './services/saml.service';
 import { PolicyGuard } from './guards/policy.guard';
+import { NoImpersonationGuard } from './guards/no-impersonation.guard';
 import { Public } from './decorators/public.decorator';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { LogoutDto } from './dto/logout.dto';
@@ -193,9 +194,15 @@ export class IamController {
   // mean signing into one silently signs you out of the other two. The trade is
   // that they must be individually visible and revocable — that is what these
   // three routes are for.
+  //
+  // All three, and the MFA routes below, refuse an impersonation token (403,
+  // NoImpersonationGuard). The device list is the account holder's — IPs and
+  // user agents included, and it hands out the ids DELETE takes — and signing
+  // them out or changing their second factor is not support diagnosis.
 
   @Get('sessions')
-  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @UseGuards(AuthGuard('jwt'), NoImpersonationGuard, PolicyGuard)
+  @ApiResponse({ status: 403, description: 'Refused to an impersonation token' })
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({
     summary: 'List your own active sessions',
@@ -211,7 +218,8 @@ export class IamController {
   }
 
   @Delete('sessions/:id')
-  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @UseGuards(AuthGuard('jwt'), NoImpersonationGuard, PolicyGuard)
+  @ApiResponse({ status: 403, description: 'Refused to an impersonation token' })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({
@@ -228,7 +236,8 @@ export class IamController {
   }
 
   @Post('logout-all')
-  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @UseGuards(AuthGuard('jwt'), NoImpersonationGuard, PolicyGuard)
+  @ApiResponse({ status: 403, description: 'Refused to an impersonation token' })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({
@@ -274,7 +283,8 @@ export class IamController {
   }
 
   @Post('mfa/setup')
-  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @UseGuards(AuthGuard('jwt'), NoImpersonationGuard, PolicyGuard)
+  @ApiResponse({ status: 403, description: 'Refused to an impersonation token' })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({
@@ -290,7 +300,8 @@ export class IamController {
   }
 
   @Post('mfa/setup/verify')
-  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @UseGuards(AuthGuard('jwt'), NoImpersonationGuard, PolicyGuard)
+  @ApiResponse({ status: 403, description: 'Refused to an impersonation token' })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Confirm TOTP enrolment and switch MFA on' })
@@ -301,13 +312,20 @@ export class IamController {
   }
 
   @Post('mfa/disable')
-  @UseGuards(AuthGuard('jwt'), PolicyGuard)
+  @UseGuards(AuthGuard('jwt'), NoImpersonationGuard, PolicyGuard)
+  @ApiResponse({ status: 403, description: 'Refused to an impersonation token' })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('JWT-auth')
-  @ApiOperation({ summary: 'Turn MFA off for the authenticated user' })
+  @ApiOperation({
+    summary: 'Turn MFA off for the authenticated user',
+    description:
+      'Requires a valid current TOTP code from the enrolled authenticator.',
+  })
   @ApiResponse({ status: 200, description: 'MFA disabled' })
-  async disableMfa(@Request() req) {
-    return this.iamService.disableMfa(req.user.id);
+  @ApiResponse({ status: 400, description: 'MFA is not enabled' })
+  @ApiResponse({ status: 401, description: 'Invalid MFA code' })
+  async disableMfa(@Request() req, @Body() dto: VerifyMfaSetupDto) {
+    return this.iamService.disableMfa(req.user.tenantId, req.user.id, dto.token);
   }
 
   // ── SAML SSO endpoints ────────────────────────────────────────────────────

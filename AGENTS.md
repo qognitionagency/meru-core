@@ -1338,3 +1338,21 @@ branch is not a change the portals can see (`/api-json` is the check).
      impersonation. Specs: `src/iam/nested-impersonation.spec.ts`,
      `src/iam/operator-impersonation-guard.spec.ts`,
      `src/workflow/workflow-signoff.spec.ts`.
+
+7. **2026-11-17 — hardening round (Anton's sweep #1–#6, #8, #14).** *Not
+   deployed* — uncommitted on branch `wave0/back-online`.
+   - **Saved-report and saved-widget execution is switched off.**
+     `POST /analytics/reports/:id/execute`, `POST /analytics/reports/:id/export`
+     and `GET /analytics/widgets/:id/execute` answer **503** `MER-SRV-0002`
+     "Report builder disabled pending rewrite", before anything is read. The
+     builders pasted stored configuration into raw SQL and took their tenant
+     filter from the request body (Anton #2). Creating and listing reports and
+     widgets is unchanged; the hourly scheduled-reports sweep now records each
+     due report as a failure. Spec:
+     `src/analytics/analytics-report-builder-disabled.spec.ts`.
+     **Live consumer:** governancex `app/[locale]/(dashboard)/reports/page.tsx`
+     (`generateReport` → execute, `exportReport` → export). Both already
+     surface `error.message`, so the page reads "Report builder disabled
+     pending rewrite" rather than breaking. Hide or disable the Generate and
+     Export buttons alongside the deploy. immistack and meru-dashboard call
+     neither route (grepped 2026-11-17).

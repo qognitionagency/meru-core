@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ServiceUnavailableException,
   Inject,
   forwardRef,
 } from '@nestjs/common';
@@ -24,6 +25,29 @@ import { SearchService } from '../search/search.service';
 import { AiService } from '../ai/ai.service';
 import { runTenantBoundSweep } from '../core/tenancy/tenant-bound-sweep';
 import { JobScopeEvidence } from '../jobs/job-catalogue';
+import { MeruErrorCode } from '../common/types';
+
+/**
+ * Saved-report and saved-widget EXECUTION is switched off (Anton,
+ * 2026-11-17, #2). `buildCRMQuery` and `executeWidgetQuery` paste stored
+ * configuration — columns, filter fields and operators, groupBy, sort, limit,
+ * widget fields and table — into raw SQL, the DTOs only check `@IsObject()`,
+ * and every builder took its tenant filter from `parameters.tenantId` in the
+ * request body. Any staff login could run arbitrary SQL as `meru_app`.
+ *
+ * Refused before anything is read, on every caller (HTTP execute, export, the
+ * scheduled sweep). Defining and listing reports and widgets still works.
+ * Re-enable only with a fixed query builder over allow-listed fields and
+ * entity types that takes the tenant from the server, never the body.
+ */
+// `void`, not `never`: it always throws, but a `never` call makes TypeScript
+// treat the rest of each method as unreachable and drop its null narrowing.
+function refuseReportBuilder(): void {
+  throw new ServiceUnavailableException({
+    code: MeruErrorCode.SERVER_UNAVAILABLE,
+    message: 'Report builder disabled pending rewrite',
+  });
+}
 
 export interface CreateReportDto {
   name: string;
@@ -153,6 +177,7 @@ export class AnalyticsService {
     userId: string,
     dto: ExecuteReportDto,
   ): Promise<any> {
+    refuseReportBuilder();
     const startTime = Date.now();
     const report = await this.getReport(dto.reportId, tenantId);
 
@@ -411,6 +436,7 @@ export class AnalyticsService {
   }
 
   async executeWidget(tenantId: string, widgetId: string): Promise<any> {
+    refuseReportBuilder();
     const widget = await this.widgetRepo.findOne({
       where: { id: widgetId, tenantId },
     });

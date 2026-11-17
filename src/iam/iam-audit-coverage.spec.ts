@@ -24,6 +24,8 @@ describe('IamService — IAM audit coverage', () => {
   const T = 'tenant-1';
   const ADMIN = { id: 'admin-1', roles: [PlatformRole.FIRM_ADMIN], email: 'admin@acme.test' };
 
+  const DB_NOW = '2026-11-17T08:30:00.123456Z';
+
   function build() {
     const users: Array<Record<string, any>> = [];
     const authTokens: Array<Record<string, any>> = [];
@@ -50,6 +52,8 @@ describe('IamService — IAM audit coverage', () => {
         else users[idx] = { ...u };
         return u;
       }),
+      // The database clock read `resetPassword` stamps credentialSetAt with.
+      query: jest.fn(async () => [{ at: DB_NOW }]),
     };
 
     const tenantRepo = { findOne: jest.fn(async () => ({ id: T, name: 'Acme' })) };
@@ -325,6 +329,54 @@ describe('IamService — IAM audit coverage', () => {
         context: expect.objectContaining({ tokenType: AuthTokenType.PASSWORD_RESET }),
       }),
     );
+  });
+
+  it('the TOKEN_REDEEMED row carries credentialSetAt from the DATABASE clock, the instant the MFA hard cap resets from', async () => {
+    const { service, users, authTokens, auditEvents } = build();
+    seed(users, { id: 'u1' });
+    const rawToken = 'raw-reset-token-2';
+    authTokens.push({
+      id: 'tok-2',
+      tenantId: T,
+      userId: 'u1',
+      type: AuthTokenType.PASSWORD_RESET,
+      tokenHash: crypto.createHash('sha256').update(rawToken).digest('hex'),
+      expiresAt: new Date(Date.now() + 60_000),
+      usedAt: null,
+    });
+
+    await service.resetPassword(rawToken, 'a-new-password-123');
+
+    const row = auditEvents.find((e: any) => e.action === AuditAction.TOKEN_REDEEMED);
+    // The clock that stamps auth_attempts."createdAt", in UTC to the
+    // microsecond — not Node's, which can be skewed against it.
+    expect(row.context.credentialSetAt).toBe(DB_NOW);
+  });
+
+  it('a database clock that cannot be read costs the MFA-cap boundary, never the TOKEN_REDEEMED row', async () => {
+    const { service, users, authTokens, auditEvents, userRepo } = build();
+    seed(users, { id: 'u1' });
+    const rawToken = 'raw-reset-token-3';
+    authTokens.push({
+      id: 'tok-3',
+      tenantId: T,
+      userId: 'u1',
+      type: AuthTokenType.PASSWORD_RESET,
+      tokenHash: crypto.createHash('sha256').update(rawToken).digest('hex'),
+      expiresAt: new Date(Date.now() + 60_000),
+      usedAt: null,
+    });
+    userRepo.query.mockRejectedValueOnce(new Error('clock read failed'));
+
+    await expect(service.resetPassword(rawToken, 'a-new-password-123')).resolves.toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+
+    const row = auditEvents.find((e: any) => e.action === AuditAction.TOKEN_REDEEMED);
+    expect(row).toBeDefined();
+    expect(row.context.allSessionsRevoked).toBe(true);
+    // Fail closed on the cap: no boundary, so this reset does not lift it.
+    expect(row.context).not.toHaveProperty('credentialSetAt');
   });
 
   it('revoking one session writes a SESSION_REVOKED row scoped "single"', async () => {

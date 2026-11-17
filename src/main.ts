@@ -1,6 +1,7 @@
 import { corsOrigins as resolveCorsOrigins } from './common/cors-origins';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { setupSwagger } from './swagger';
 import { AllExceptionsFilter } from './core/filters/http-exception.filter';
@@ -20,16 +21,21 @@ async function bootstrap() {
   // global bucket: a single client can exhaust the whole allowance for every
   // tenant, turning a credential-stuffing control into a denial-of-service lever.
   //
-  // `1`, never `true`. Vercel appends exactly one hop, putting the originating
-  // client first. Trusting the entire chain would let a caller prepend their own
-  // `X-Forwarded-For` and choose their own rate-limit bucket — reintroducing the
-  // evasion that removing the header was meant to close, in a new costume.
+  // A hop count, never `true`. Vercel appends exactly one hop, putting the
+  // originating client first. Trusting the entire chain would let a caller
+  // prepend their own `X-Forwarded-For` and choose their own rate-limit bucket
+  // — reintroducing the evasion that removing the header was meant to close,
+  // in a new costume. `TRUST_PROXY_HOPS` (1–3, default 1, validated at boot in
+  // configuration.ts) is for a host with more than one proxy in front of it.
+  // `api/index.js` (Vercel) keeps its literal 1.
   //
   // This also fixes `req.ip` for `session-context.util.ts`, which had been
   // reading `x-forwarded-for` by hand to work around exactly this.
   // `INestApplication` has no `.set()`; reach the underlying Express instance.
+  const trustProxyHops =
+    app.get(ConfigService).get<number>('trustProxyHops') ?? 1;
   (app.getHttpAdapter().getInstance() as { set: (k: string, v: unknown) => void })
-    .set('trust proxy', 1);
+    .set('trust proxy', trustProxyHops);
   const logger = new Logger('Bootstrap');
 
   // Browser-origin allowlist — built-in list + CORS_ALLOWED_ORIGINS (additive).

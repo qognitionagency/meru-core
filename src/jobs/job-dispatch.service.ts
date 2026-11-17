@@ -17,6 +17,7 @@ import { RetentionService } from '../audit/retention.service';
 import { AuditReconcilerService } from '../audit/audit-reconciler.service';
 import { RegulatoryRadarEngine } from '../ai/engines/regulatory-radar.engine';
 import { JobRunService } from './job-run.service';
+import { AuthAttemptLimiter } from '../iam/services/auth-attempt-limiter.service';
 import { NotificationDispatchService } from '../notifications/notification-dispatch.service';
 import { WatchlistIngestService } from '../ai/engines/watchlist-ingest.service';
 import { ScreeningEngine } from '../ai/engines/screening.engine';
@@ -94,6 +95,7 @@ export class JobDispatchService {
     private readonly screeningEngine: ScreeningEngine,
     // Last, so the positional constructors in the existing specs still line up.
     private readonly auditReconciler: AuditReconcilerService,
+    private readonly authAttempts: AuthAttemptLimiter,
   ) {}
 
   /**
@@ -223,6 +225,11 @@ export class JobDispatchService {
         return () => this.rescreeningService.sweep();
       case 'digest-emails':
         return () => this.notificationsService.sendDigestEmails();
+      case 'auth-attempts-prune':
+        // Cross-tenant retention under runAsSystem (inside prune). A summary
+        // with `complete: false` stopped at its batch ceiling; the next run
+        // continues.
+        return () => this.authAttempts.prune();
     }
   }
 

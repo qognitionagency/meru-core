@@ -8,6 +8,7 @@ import { AddTenantConnectors1754700000000 } from '../migrations/1754700000000-Ad
 import { AddWatchlistEntries1754900000000 } from '../migrations/1754900000000-AddWatchlistEntries';
 import { AddJobRuns1755100000000 } from '../migrations/1755100000000-AddJobRuns';
 import { AddTenantSignupInvites1756800000000 } from '../migrations/1756800000000-AddTenantSignupInvites';
+import { AddAuthAttempts1757500000000 } from '../migrations/1757500000000-AddAuthAttempts';
 
 export type MigrateTarget = 'control' | 'govx' | 'immistack';
 
@@ -154,6 +155,9 @@ export class MigrateService {
           new AddWatchlistEntries1754900000000(),
           new AddJobRuns1755100000000(),
           new AddTenantSignupInvites1756800000000(),
+          // Tenant-scoped, so the dynamic loop covers it as well; listed so
+          // the replay does not depend on that.
+          new AddAuthAttempts1757500000000(),
         ];
         const runner = ds.createQueryRunner();
         try {

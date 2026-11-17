@@ -49,6 +49,7 @@ import { AddIamAuditActions1757100000000 } from '../migrations/1757100000000-Add
 import { AddJobRunScope1757200000000 } from '../migrations/1757200000000-AddJobRunScope';
 import { AddDocumentReviewStatus1757300000000 } from '../migrations/1757300000000-AddDocumentReviewStatus';
 import { NullDocumentVersionEncryptionKeys1757400000000 } from '../migrations/1757400000000-NullDocumentVersionEncryptionKeys';
+import { AddAuthAttempts1757500000000 } from '../migrations/1757500000000-AddAuthAttempts';
 
 /**
  * Every migration, bundled. The Vercel serverless bundle cannot glob the
@@ -147,4 +148,9 @@ export const ALL_MIGRATIONS = [
   // Registered in the same change as the migration file, per this array's
   // standing instruction.
   NullDocumentVersionEncryptionKeys1757400000000,
+  // Owen's gate — sign-in attempt counting moved out of the audit hash chain
+  // so an unauthenticated burst cannot queue on the tenant's chain lock.
+  // Registered in the same change as the migration file, per this array's
+  // standing instruction. NOT YET APPLIED anywhere.
+  AddAuthAttempts1757500000000,
 ];

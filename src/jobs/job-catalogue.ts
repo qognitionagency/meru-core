@@ -80,6 +80,9 @@ export const JOB_CADENCE_MINUTES = {
   // earlier in the same tick rather than yesterday's.
   'rescreening': 1440,
   'digest-emails': 1440,
+  // Retention for `auth_attempts` (Anton, second gate): deletes rows older
+  // than AUTH_ATTEMPT_RETENTION_DAYS (a 30-day proposal), in bounded batches.
+  'auth-attempts-prune': 1440,
 } as const;
 
 export type JobName = keyof typeof JOB_CADENCE_MINUTES;

@@ -32,6 +32,7 @@ describe('JobDispatchService.runNamed', () => {
       undefined as any, // watchlistIngest
       undefined as any, // screeningEngine
       undefined as any, // auditReconciler
+      undefined as any, // authAttempts
     );
 
   beforeEach(() => {

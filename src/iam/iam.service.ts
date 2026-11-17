@@ -44,6 +44,7 @@ import * as crypto from 'crypto';
 // function on every request with ERR_REQUIRE_ESM. v12's tree (thirty-two +
 // node:crypto) is plain CommonJS. See scripts/check-cjs-deps.js.
 import { authenticator } from 'otplib';
+import { databaseNowUtc } from './services/auth-attempt-limiter.service';
 import * as QRCode from 'qrcode';
 
 /**
@@ -642,6 +643,14 @@ export class IamService {
 
     if (!user || !user.mfaSecret)
       throw new NotFoundException('MFA not initialized');
+
+    // Already on: there is nothing to confirm, and checking a code here would
+    // be an unthrottled oracle against the live secret — this route's wrong
+    // code is a 400, which the MFA attempt limiter does not count (Owen's
+    // gate, 2026-11-17). Same refusal `setupMfa` gives.
+    if (user.mfaEnabled) {
+      throw new BadRequestException('MFA is already enabled');
+    }
 
     const isValid = authenticator.check(token, user.mfaSecret);
     if (!isValid) throw new BadRequestException('Invalid verification code');
@@ -1690,6 +1699,26 @@ export class IamService {
   }
 
   /**
+   * The user an MFA challenge token belongs to, or null.
+   *
+   * For the per-account MFA attempt limit (Anton, 2026-11-17, #6;
+   * `MfaAttemptLimitInterceptor`). Here because this file is the one
+   * sanctioned verifier of a challenge token (`one-jwt-verifier.spec.ts`), and
+   * with the same rule as `verifyMfaLogin`: only a token carrying
+   * `mfaPending` names anyone. Never throws; an invalid token is null.
+   */
+  mfaChallengeSubject(temporaryToken: string): string | null {
+    if (!temporaryToken) return null;
+    let challenge: { sub?: string; mfaPending?: boolean };
+    try {
+      challenge = this.jwtService.verify(temporaryToken);
+    } catch {
+      return null;
+    }
+    return challenge?.mfaPending && challenge.sub ? challenge.sub : null;
+  }
+
+  /**
    * Begin a password reset.
    *
    * Always resolves the same way regardless of whether the address exists.
@@ -1844,6 +1873,24 @@ export class IamService {
 
       this.logger.log(`Password set for ${user.email} via ${record.type}`);
 
+      // When the new credential took effect, on the DATABASE clock — the one
+      // that stamps auth_attempts."createdAt" — so the MFA hard cap resets
+      // from it whatever Node's clock says (AuthAttemptLimiter). The password
+      // is already changed here, so a clock that cannot be read must not cost
+      // the audit row below or fail the request (Owen's gate): the row is
+      // written without the boundary, and this reset then does not lift the
+      // MFA hard cap — fail closed; an operator unlock still does.
+      let credentialSetAt: string | undefined;
+      try {
+        credentialSetAt = await databaseNowUtc(this.userRepo);
+      } catch (err) {
+        this.logger.error(
+          `Database clock unreadable after a credential change for user ${user.id}; ` +
+            `audited without credentialSetAt, so the MFA hard cap is not lifted: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+
       // The whole point of this event: someone set a credential using a
       // bearer token, with no session and no logged-in actor to attribute it
       // to otherwise. `context.tokenType` distinguishes an invite acceptance
@@ -1858,7 +1905,15 @@ export class IamService {
         entityType: 'user',
         entityId: user.id,
         description: `Credential set for ${user.email} via ${record.type} token`,
-        context: { tokenType: record.type, allSessionsRevoked: true },
+        context: {
+          tokenType: record.type,
+          allSessionsRevoked: true,
+          // A new password lifts the MFA hard cap: AuthAttemptLimiter counts
+          // MFA failures only after this instant. UTC ISO, because
+          // `audit_logs."timestamp"` has no zone. Absent if the clock read
+          // failed.
+          ...(credentialSetAt ? { credentialSetAt } : {}),
+        },
       });
 
       return { ok: true as const, email: user.email };

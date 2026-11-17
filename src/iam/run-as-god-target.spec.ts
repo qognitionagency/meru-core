@@ -182,6 +182,7 @@ describe('runAsGod call sites — the audit row is filed under the tenant touche
         { getPlatformStats: jest.fn().mockResolvedValue({}) } as any,
         tenancyService,
         { reload: jest.fn().mockResolvedValue({}) } as any,
+        {} as any,
       );
     }
 

@@ -11,6 +11,7 @@ import { AuthToken } from '../iam/entities/auth-token.entity';
 import { ApiKey } from '../iam/entities/api-key.entity';
 import { TenantConfigPin } from '../iam/entities/tenant-config-pin.entity';
 import { TenantSignupInvite } from '../iam/entities/tenant-signup-invite.entity';
+import { AuthAttempt } from '../iam/entities/auth-attempt.entity';
 import { ConfigPack } from '../tenant/entities/config-pack.entity';
 import { FeatureFlag } from '../tenant/entities/feature-flag.entity';
 import { IntegrationAdapter } from '../integrations/entities/integration-adapter.entity';
@@ -91,6 +92,8 @@ export const ALL_ENTITIES = [
   ApiKey,
   TenantConfigPin,
   TenantSignupInvite,
+  // Sign-in attempt counting, outside the audit chain (migration 1757500000000).
+  AuthAttempt,
   TenantSetting,
   // Config
   ConfigPack,

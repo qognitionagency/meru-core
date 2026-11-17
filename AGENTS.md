@@ -1382,6 +1382,18 @@ branch is not a change the portals can see (`/api-json` is the check).
      now dials through `http(s).request` with `guardedLookup`, so the address
      connected to is the one checked (the DNS-rebinding window is closed; no
      new dependency). A 3xx from the provider is refused, not followed.
+   - **Sign-in limits (Anton #6).** `POST /auth/login`: after 10 wrong
+     passwords for one account in 15 minutes, that account gets the same 401
+     "Invalid email or password" even with the right password, until failures
+     age out. `POST /auth/mfa/verify` and `POST /auth/mfa/disable`: after 5
+     wrong codes in 15 minutes, **429** `MER-RATE-0001`; **503** if the limiter
+     cannot read or record. Each failure writes an `audit_logs` row
+     (`action: login`, `context.event: auth.login.failed | auth.mfa.failed`), so
+     the immistack audit page will show them as "Login" rows. Render a 429 on
+     MFA as "too many attempts, wait", not as a wrong code.
+     **Superseded by item 8 (Owen's gate):** the per-account lock above was a
+     denial of service with no undo, and the `audit_logs` storage queued
+     unauthenticated writes on the tenant's chain lock. Read item 8 instead.
    - **`GET /analytics/trends/:kpiKey` (Anton #8):** a caller who is not tenant
      staff gets **404** unless a client-portal dashboard visible to them shows
      that KPI as a `kpi` widget. Staff are unchanged.
@@ -1417,3 +1429,102 @@ branch is not a change the portals can see (`/api-json` is the check).
      `common/access.ts` reserves for `runAsGod`) or staff KPIs computed over
      the operator's own records (zero, rendered as a firm figure). Needs a
      decision, not a role-set edit.
+
+8. **2026-11-17 — follow-up round on Owen's FIX gate.** *Not deployed* —
+   uncommitted on branch `wave0/back-online`. **Migration
+   `1757500000000-AddAuthAttempts` is written and registered but NOT
+   applied anywhere; apply it before this code ships** (until then the
+   limiter logs errors and degrades to per-process counting, row 6 below).
+   - **Sign-in attempt limits, redesigned.** Keyed on account **and source**
+     (`req.ip` under `trust proxy` = 1; IPv4-mapped folded to IPv4, IPv6
+     reduced to its /64). Stored in `auth_attempts` (tenant-scoped, RLS),
+     **not** `audit_logs`, so no unauthenticated write takes the tenant's
+     chain lock. Numbers are proposals `[NEEDS DATA: Anton/operator]`:
+     login 10 per source per 15 min, account-wide backstop 50; MFA 5 per
+     source, backstop 25. Past the backstop every source is held to **one**
+     failure per window; the account itself is never hard-locked.
+
+     | # | Situation | Login (`POST /auth/login`) | MFA verify/disable |
+     |---|---|---|---|
+     | 1 | Right password, source under its cap | signed in | handler runs |
+     | 2 | Wrong password / code, source under cap | 401 "Invalid email or password", failure row written (500 ms lock bound) | 401 from handler, failure counted |
+     | 3 | Source at its cap, right or wrong secret | 401 same body, secret not checked, bcrypt time spent; one `refused_locked` row per source per minute | 429 `MER-RATE-0001`; same refusal row |
+     | 4 | Account past backstop, **clean** source (the holder's) | row 1 / row 2 apply — never locked by others' guesses | same |
+     | 5 | Account past backstop, source with ≥1 failure | row 3 | row 3 |
+     | 6 | Count unreadable (store down, migration not applied) | decided on this process's ledger only, logged at error: a clean source still signs in, a source this process saw fail 10× is refused | same, 5× |
+     | 7 | Failure write fails or times out | still 401; failure kept in-process and **counted** — the guesser still reaches the cap (per process) | same |
+     | 8 | Unknown email | 401 same body, bcrypt time spent, nothing written | n/a |
+     | 9 | After an operator unlock | login failures at or before the `auth.login.unlocked` row stop counting, every source | MFA failures are **not** reset; they age out |
+
+     **Superseded in part by item 9:** the MFA backstop is now 10, MFA has a
+     24-hour hard cap, the unlock covers MFA too, the attempt is written
+     before the secret is checked, and `auth_attempts` is pruned daily.
+
+     Timing still differs for a known account (row 2 also runs the count and
+     the write): narrowed, not closed. Residual risk, stated: an attacker
+     with many addresses gets up to the backstop (50) per window, then one
+     guess per further address it has not used yet; a hard lock would stop
+     that and is exactly the denial of service this replaces. `[NEEDS DATA: retention — nothing prunes
+     auth_attempts yet; Jonas.]` Failed sign-ins no longer appear in
+     `audit_logs`, so the immistack audit page stops showing them as "Login"
+     rows; no screen reads `auth_attempts` yet.
+     Specs: `src/iam/services/auth-attempt-limiter.spec.ts`,
+     `src/iam/strategies/local-strategy-attempts.spec.ts`,
+     `src/iam/interceptors/mfa-attempt-limit.spec.ts`.
+   - **New: `POST /platform/users/:id/unlock`** `{ reason }` (10–300 chars).
+     `platform_admin` only, refused to an impersonation session (403),
+     `runAsGod` against the **user's** tenant (CRITICAL row first), then one
+     strict `auth.login.unlocked` audit row (`action: update`, severity
+     critical, `entityId` = the user). 404 unknown user; 503 if the audit
+     row cannot be written, and then nothing is unlocked. Answers
+     `{ userId, unlocked: true }`. No screen calls it yet; meru-dashboard is
+     the natural home. Spec: `src/iam/platform-unlock.spec.ts`.
+   - **`POST /auth/mfa/setup/verify` with MFA already on → 400** "MFA is
+     already enabled", before any code is checked or row written (it was an
+     unthrottled code oracle against the live secret). Spec:
+     `src/iam/mfa-disable.spec.ts`.
+   - **Dashboards and trends are own-scoped for non-staff callers** — see the
+     correction under item 7.
+
+9. **2026-11-17 — second FIX round on Owen's gate (w1-18, w1-17, w1-13, and
+   Anton's client-reachable routes).** *Not deployed* — uncommitted on branch
+   `wave0/back-online`. Migration `1757500000000-AddAuthAttempts` is still
+   not applied anywhere; nothing in this item adds a migration.
+   - **Sign-in limits — what changed from item 8.**
+     - The count query now actually runs on Postgres. It failed on every call
+       before (`varchar = uuid`), so the cap had silently been per-process.
+       The unlock boundary is read from `context.unlockedAt`, never from the
+       zone-less `audit_logs."timestamp"`. Verified against a real Postgres
+       built from the entities under nine Node/Postgres timezone pairs.
+     - **Boundaries are on the database clock.** The unlock row's
+       `context.unlockedAt` and the password-reset row's
+       `context.credentialSetAt` (`action: token_redeemed`) are the database's
+       `now()`, as UTC ISO with microseconds, read just before the audit row is
+       written — the clock that stamps `auth_attempts."createdAt"`. Nothing
+       here depends on the Node or Postgres timezone, or on Node's clock.
+     - **Production refuses to boot** if the real count query cannot run
+       (`AuthAttemptLimiter.onModuleInit`); elsewhere it logs. Not on
+       `/health/ready`.
+     - **The attempt is written before the secret is checked**, so a parallel
+       burst sees itself: one source gets at most 10 password comparisons (5
+       MFA) however the requests interleave. A burst that lands all at once
+       may be refused whole — still the same 401 / 429.
+     - **MFA hard cap:** 10 MFA failures per account in 24 h, from any source,
+       → **429** "Too many failed MFA attempts — locked until your password is
+       reset or an operator unlocks the account", from every source, until a
+       password reset or `POST /platform/users/:id/unlock` (the same
+       `auth.login.unlocked` row now clears login AND MFA). MFA backstop
+       10 per 15 min (was 25). `[NEEDS DATA: both are proposals.]` Telling the
+       user or the firm admin is a follow-up: mail is not deliverable.
+     - **Past the account backstop, a source is its IPv4 /24 or IPv6 /48**,
+       not one address.
+     - **`TRUST_PROXY_HOPS`** (integer 1–3, default 1, anything else refuses
+       boot) sets Express `trust proxy` in `src/main.ts`. Default behaviour is
+       unchanged. `api/index.js` keeps a literal 1: it is the Vercel-only
+       entrypoint and is no longer deployed.
+     - **Retention:** daily job `auth-attempts-prune` deletes `auth_attempts`
+       rows older than 30 days `[NEEDS DATA: proposal]`, in batches of 5,000,
+       at most 20 per run (`complete: false` in the job summary if it stopped).
+     Specs: `src/iam/services/auth-attempt-limiter.spec.ts`,
+     `src/iam/attempt-race.spec.ts`, `src/config/trust-proxy-hops.spec.ts`,
+     `src/jobs/job-dispatch-auth-attempts-prune.spec.ts`.

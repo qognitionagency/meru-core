@@ -53,9 +53,15 @@ describe('rate-limit key cannot be forged', () => {
    * `X-Forwarded-For` and pick their own bucket — the same evasion in a new
    * costume.
    */
-  it.each(entrypoints)('%s sets trust proxy to exactly one hop', (file) => {
-    const src = readFileSync(file, 'utf8');
+  it('api/index.js (Vercel) sets trust proxy to exactly one hop', () => {
+    const src = readFileSync(entrypoints[0], 'utf8');
     expect(src).toMatch(/\.set\(\s*['"]trust proxy['"]\s*,\s*1\s*\)/);
+  });
+
+  // src/main.ts takes a bounded hop count from TRUST_PROXY_HOPS (1–3,
+  // default 1) instead — pinned in src/config/trust-proxy-hops.spec.ts.
+  it.each(entrypoints)('%s never trusts the whole chain', (file) => {
+    const src = readFileSync(file, 'utf8');
     // `true` would trust a caller-supplied chain.
     expect(src).not.toMatch(/\.set\(\s*['"]trust proxy['"]\s*,\s*true\s*\)/);
   });

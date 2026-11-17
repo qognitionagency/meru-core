@@ -1,4 +1,5 @@
 import { forwardRef, Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -27,6 +28,8 @@ import { TenantModule } from '../tenant/tenant.module';
 import { TenantSetting } from '../tenant/entities/tenant-setting.entity';
 import { AuditModule } from '../audit/audit.module';
 import { SamlService } from './services/saml.service';
+import { AuthAttemptLimiter } from './services/auth-attempt-limiter.service';
+import { MfaAttemptLimitInterceptor } from './interceptors/mfa-attempt-limit.interceptor';
 
 @Module({
   imports: [
@@ -72,6 +75,10 @@ import { SamlService } from './services/saml.service';
     PolicyGuard,
     TenantProvisioningService,
     SamlService,
+    // Per-account attempt limits (Anton, 2026-11-17, #6). The interceptor is
+    // global but acts only on IamController.verifyMfaLogin / disableMfa.
+    AuthAttemptLimiter,
+    { provide: APP_INTERCEPTOR, useClass: MfaAttemptLimitInterceptor },
   ],
   exports: [
     IamService,
@@ -80,6 +87,8 @@ import { SamlService } from './services/saml.service';
     JwtStrategy,
     SamlService,
     JwtModule,
+    // JobsModule's `auth-attempts-prune` (retention for auth_attempts).
+    AuthAttemptLimiter,
   ],
 })
 export class IamModule {

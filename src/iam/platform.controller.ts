@@ -1,8 +1,12 @@
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
+  NotFoundException,
+  Param,
+  ParseUUIDPipe,
   Post,
   Request,
   UseGuards,
@@ -11,6 +15,7 @@ import { AuthGuard } from '@nestjs/passport';
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -21,6 +26,9 @@ import { TenantProvisioningService } from './tenant-provisioning.service';
 import { TenancyService } from '../core/tenancy/tenancy.service';
 import type { AuthenticatedRequest } from '../common/types';
 import { ConfigPackLoaderService } from '../tenant/services/config-pack-loader.service';
+import { NoImpersonationGuard } from './guards/no-impersonation.guard';
+import { AuthAttemptLimiter } from './services/auth-attempt-limiter.service';
+import { UnlockUserDto } from './dto/unlock-user.dto';
 
 /**
  * Platform-level (cross-tenant) reads for the God UI. Everything here is
@@ -34,6 +42,7 @@ export class PlatformController {
     private readonly tenantProvisioningService: TenantProvisioningService,
     private readonly tenancyService: TenancyService,
     private readonly configPackLoader: ConfigPackLoaderService,
+    private readonly attempts: AuthAttemptLimiter,
   ) {}
 
   @Get('stats')
@@ -90,5 +99,54 @@ export class PlatformController {
       'Reload config packs from disk (God View)',
       () => this.configPackLoader.reload(),
     );
+  }
+
+  @Post('users/:id/unlock')
+  @HttpCode(HttpStatus.OK)
+  // NoImpersonationGuard after the JWT guard (it reads req.user): an
+  // impersonation session's runAsGod row would name the impersonated user.
+  @UseGuards(AuthGuard('jwt'), PolicyGuard, NoImpersonationGuard)
+  @Roles(PlatformRole.PLATFORM_ADMIN)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: "Lift a user's sign-in lock (God View)",
+    description:
+      'Writes the CRITICAL god-mode entry against the user\'s own tenant, ' +
+      'then one `auth.login.unlocked` audit row carrying `unlockedAt`. ' +
+      'Password AND MFA failures at or before that instant stop counting, ' +
+      'for every source, which also lifts the MFA hard cap (10 failures per ' +
+      'account per 24 h; a password reset lifts it too). `reason` is ' +
+      'required and is written verbatim.',
+  })
+  @ApiParam({ name: 'id', description: 'User id' })
+  @ApiResponse({ status: 200, description: 'Unlocked' })
+  @ApiResponse({ status: 403, description: 'Requires platform_admin; refused to an impersonation session' })
+  @ApiResponse({ status: 404, description: 'No such user' })
+  @ApiResponse({ status: 503, description: 'Audit log unavailable — nothing was unlocked' })
+  async unlockUser(
+    @Request() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UnlockUserDto,
+  ) {
+    // Bootstrap read under runAsSystem: the user's tenant is what it finds.
+    // Nothing is written for an id that does not exist.
+    const account = await this.attempts.findAccountById(id);
+    if (!account) throw new NotFoundException('User not found');
+
+    // Tenant scope: the ACCOUNT's tenant, resolved server-side, so the firm
+    // sees the override in its own audit log (as for impersonation). The
+    // CRITICAL row is written before the unlock and rethrows if it cannot be.
+    await this.tenancyService.runAsGod(
+      req.user.id,
+      account.tenantId,
+      `Unlock sign-in for user ${account.id} — ${dto.reason} (God View)`,
+      () =>
+        this.attempts.unlock(
+          account,
+          { id: req.user.id, tenantId: req.user.tenantId, email: req.user.email },
+          dto.reason,
+        ),
+    );
+    return { userId: account.id, unlocked: true };
   }
 }

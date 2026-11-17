@@ -159,5 +159,25 @@ describe('IamService — MFA disable and enable', () => {
         });
       }
     });
+
+    // Owen's gate, 2026-11-17: with MFA already on, this route checked codes
+    // against the live secret with no limit — its wrong-code answer is a 400,
+    // which the MFA attempt limiter does not count — so a session holder had
+    // an unthrottled TOTP oracle. Refused before any code is checked.
+    it('refuses when MFA is already enabled, before checking the code, and writes nothing', async () => {
+      const check = jest.spyOn(authenticator, 'check');
+      const { service, auditEvents, userRepo } = build(enrolled());
+
+      const err = await service
+        .verifyMfaSetup('u1', authenticator.generate(SECRET))
+        .catch((e) => e);
+
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as Error).message).toBe('MFA is already enabled');
+      expect(check).not.toHaveBeenCalled();
+      expect(auditEvents).toHaveLength(0);
+      expect(userRepo.save).not.toHaveBeenCalled();
+      check.mockRestore();
+    });
   });
 });

@@ -34,6 +34,12 @@ export const validationSchema = Joi.object({
   RATE_LIMIT_MAX_GLOBAL: Joi.number().empty('').default(100),
   RATE_LIMIT_MAX_IMMIGRATION: Joi.number().empty('').default(100),
   RATE_LIMIT_MAX_BANKING: Joi.number().empty('').default(50),
+  // How many proxies in front of the API append to X-Forwarded-For; Express
+  // `trust proxy` in src/main.ts. `req.ip` — the rate-limit key and the
+  // sign-in attempt limiter's source — is read that many hops back. Too high
+  // and a caller's own X-Forwarded-For entry becomes their address, so it is
+  // bounded and refused at boot outside 1–3. Default 1 (Vercel's one hop).
+  TRUST_PROXY_HOPS: Joi.number().integer().min(1).max(3).empty('').default(1),
 
   // AWS Secrets Manager
   AWS_REGION: Joi.string().empty('').default('ap-south-1'),
@@ -148,6 +154,8 @@ const stripSslMode = (url?: string): string | undefined => {
 
 export const configuration = () => ({
   port: parseInt(process.env.PORT || '3000', 10),
+  // Validated 1–3 by TRUST_PROXY_HOPS above before this is ever read.
+  trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
   vertical: process.env.VERTICAL || 'core',
   database: {
     // Runtime connects as the non-BYPASSRLS `meru_app` role so tenant policies

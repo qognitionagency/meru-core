@@ -1,14 +1,23 @@
-import { Logger, Injectable, OnModuleInit } from '@nestjs/common';
+import {
+  Logger,
+  Injectable,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { QueueService } from './queue.service';
 import { QueueJob } from './entities/job.entity';
 import { JobType, JobResult, JobStatus } from './interfaces/job.interface';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TenantContext } from '../core/tenancy/tenant-context';
 import { JobScopeEvidence } from '../jobs/job-catalogue';
+import { internalSchedulerEnabled } from '../config/configuration';
 
 @Injectable()
-export class JobProcessor implements OnModuleInit {
+export class JobProcessor implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobProcessor.name);
+
+  /** Cleared on shutdown so the long-running loop exits between jobs. */
+  private running = false;
 
   constructor(
     private queueService: QueueService,
@@ -24,7 +33,22 @@ export class JobProcessor implements OnModuleInit {
       this.logger.log('Serverless runtime detected — processor loop disabled.');
       return;
     }
-    this.startProcessorLoop();
+    // Long-lived process (Render, local): the loop is opt-in. With it off,
+    // /api/v1/jobs/tick → drainQueue() is the single driver; running both
+    // would race the same queue from two schedulers. See INTERNAL_SCHEDULER
+    // in src/config/configuration.ts.
+    if (!internalSchedulerEnabled()) {
+      this.logger.log(
+        'INTERNAL_SCHEDULER is off — processor loop disabled; /jobs/tick drains the queue.',
+      );
+      return;
+    }
+    this.running = true;
+    void this.startProcessorLoop();
+  }
+
+  onModuleDestroy() {
+    this.running = false;
   }
 
   /**
@@ -82,13 +106,23 @@ export class JobProcessor implements OnModuleInit {
   }
 
   private async startProcessorLoop(): Promise<void> {
-    while (true) {
+    while (this.running) {
       try {
-        // Get next available job (all types)
-        const job = await this.queueService.getNextJob(Object.values(JobType));
+        // Tenant scope: identical to drainQueue() above (ADR 0018 §2.3). The
+        // priority claim is cross-tenant by design, so it runs under system
+        // context; everything after the claim — the handler and the
+        // completeJob/failJob writes — is bound to the job's own tenant.
+        // Unbound, FORCE RLS made the claim match nothing and the writes
+        // affect zero rows.
+        const job = await TenantContext.runAsSystem(
+          'queue-loop: claim next job',
+          () => this.queueService.getNextJob(Object.values(JobType)),
+        );
 
         if (job) {
-          await this.processJobInternal(job);
+          await TenantContext.run({ tenantId: job.tenantId }, () =>
+            this.processJobInternal(job),
+          );
         } else {
           // No jobs available, wait before checking again
           await this.sleep(1000);

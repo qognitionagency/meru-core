@@ -61,11 +61,62 @@ export const validationSchema = Joi.object({
   AWS_S3_BUCKET: Joi.string().empty('').default('meru-documents'),
 
   // Documents
-  DOCUMENT_ENCRYPTION_KEY: Joi.string().empty('').default(
-    'default-encryption-key-32-chars!',
-  ),
+  //
+  // Production refuses to boot without a real key. The default below is a
+  // constant committed to this repository, so a document "encrypted" under it
+  // in production is encrypted with a public key. Development and test keep
+  // the default so a fresh checkout still boots.
+  //
+  // No length floor, deliberately: documents.service.ts `encryptFile` derives
+  // the AES key with scryptSync(secret, 'salt', 32), which accepts any
+  // non-empty string, so non-empty is all the runtime requires. A floor would
+  // be policy, and could refuse boot on a production key whose length this
+  // repo does not know. Unlike CREDENTIALS_ENCRYPTION_KEY below.
+  DOCUMENT_ENCRYPTION_KEY: Joi.string()
+    .empty('')
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.required(),
+      otherwise: Joi.optional().default('default-encryption-key-32-chars!'),
+    }),
+  // Connector credentials (src/core/crypto/credential-cipher.ts). That module
+  // already refuses to encrypt without it, but only at the moment a credential
+  // is stored; production now says so at boot instead of mid-request.
+  // `.min(32)` is the cipher's own floor (credential-cipher.ts `key()` throws
+  // under 32 characters) — the guard must refuse exactly what the cipher
+  // refuses, or a short key boots and fails on first use.
+  CREDENTIALS_ENCRYPTION_KEY: Joi.string()
+    .empty('')
+    .when('NODE_ENV', {
+      is: 'production',
+      then: Joi.string().min(32).required(),
+      otherwise: Joi.optional(),
+    }),
   MAX_FILE_SIZE: Joi.number().empty('').default(52428800),
+
+  // In-process scheduling: the @Cron handlers (ScheduleModule) and the queue
+  // polling loop (JobProcessor). Off by default — the HTTP route
+  // /api/v1/jobs/tick is the single driver, called by Vercel Cron or Render
+  // cron. Turning it on while those crons also run does every job twice.
+  // A value other than on/off is refused rather than silently meaning "off".
+  INTERNAL_SCHEDULER: Joi.string()
+    .empty('')
+    .trim()
+    .lowercase()
+    .valid('on', 'off')
+    .default('off'),
 });
+
+/**
+ * Whether the in-process scheduler runs (see INTERNAL_SCHEDULER above).
+ *
+ * Read from the environment directly, not through ConfigService, because
+ * `app.module.ts` must decide whether to import `ScheduleModule` while its
+ * `@Module` decorator is being evaluated — before any provider exists.
+ */
+export const internalSchedulerEnabled = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => (env.INTERNAL_SCHEDULER ?? '').trim().toLowerCase() === 'on';
 
 /**
  * Strip `sslmode` (and `channel_binding`) from a Postgres URL.

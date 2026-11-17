@@ -10,6 +10,7 @@ import { GlobalAuthGuard } from './core/auth/global-auth.guard';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AppConfigModule } from './config/config.module';
+import { internalSchedulerEnabled } from './config/configuration';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { IamModule } from './iam/iam.module';
@@ -47,8 +48,14 @@ import { ALL_ENTITIES } from './config/entities';
     // 2. Event Emitter for @OnEvent decorators
     EventEmitterModule.forRoot(),
 
-    // 3. Scheduler for @Cron/@Interval decorators
-    ScheduleModule.forRoot(),
+    // 3. Scheduler for @Cron/@Interval decorators — only when
+    //    INTERNAL_SCHEDULER=on. Without ScheduleModule the @Cron decorators are
+    //    inert metadata: nothing registers them, so nothing fires. Default off,
+    //    because /api/v1/jobs/tick (Vercel Cron, Render cron) is the single
+    //    driver, and running both does every minute-level job twice.
+    //    NB: when on, the @Cron handlers run outside any request, with no
+    //    tenant bound — verify each one's tenant handling before turning it on.
+    ...(internalSchedulerEnabled() ? [ScheduleModule.forRoot()] : []),
 
     // 4. Database Setup (Connecting all modules)
     TypeOrmModule.forRootAsync({

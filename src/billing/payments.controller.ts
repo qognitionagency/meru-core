@@ -92,6 +92,11 @@ export class PaymentsController {
       '?direction=. A client-role caller is forced to their own **inbound** ' +
       "rows: the firm's disbursements are its own expenditure and are not " +
       'visible to the client even on their own matter.\n\n' +
+      '`?clientId=` accepts either a `users.id` or a CRM person entity id. A ' +
+      'person id matches rows stored under the `users.id` it resolves to ' +
+      '(the id `POST /payments` stores) and any older rows stored under the ' +
+      'person id itself. An id that names nobody returns an empty page, not ' +
+      'an error. A client-role caller cannot use it to widen their view.\n\n' +
       'Amounts are integer minor units. Totals are a separate call — see ' +
       '`GET /payments/summary`.',
   })
@@ -229,7 +234,9 @@ export class PaymentsController {
       'Summed in SQL over the whole filtered ledger, not the current page — ' +
       'a client portal shows this as "outstanding". Grouped by currency ' +
       'because a total across mixed currencies means nothing. Client-role ' +
-      'callers are scoped to their own rows, same as the list.',
+      'callers are scoped to their own rows, same as the list.\n\n' +
+      '`?clientId=` accepts a `users.id` or a CRM person entity id and ' +
+      'matches exactly the rows `GET /payments` returns for the same value.',
   })
   @ApiResponse({ status: 200, description: 'Totals retrieved' })
   async summary(

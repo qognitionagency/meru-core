@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
 import {
   Payment,
   PaymentDirection,
@@ -61,7 +61,7 @@ export class PaymentsService {
     // (src/config/entities.ts), so a plain `DataSource.getRepository` reaches
     // them without wiring `BillingModule` into `IamModule` and `CrmModule` —
     // same pattern as `TenantProvisioningService` (tenant-provisioning.service.ts:429).
-    // Used only by {@link resolveClientUserId}.
+    // Used only by {@link resolveClientUserId} and {@link clientIdsForRead}.
     @InjectDataSource()
     private readonly dataSource: DataSource,
   ) {}
@@ -167,12 +167,7 @@ export class PaymentsService {
       );
     }
 
-    // Case-insensitive by comparison, not by index: see the method doc for why.
-    const user = await userRepo
-      .createQueryBuilder('u')
-      .where('u."tenantId" = :tenantId', { tenantId })
-      .andWhere('LOWER(u.email) = LOWER(:email)', { email: person.email })
-      .getOne();
+    const user = await this.userByEmail(tenantId, person.email);
 
     if (!user) {
       throw new BadRequestException(
@@ -186,6 +181,100 @@ export class PaymentsService {
     return user.id;
   }
 
+  /**
+   * The `users` row a person record resolves to. One copy, shared by the
+   * write path ({@link resolveClientUserId}) and the read path
+   * ({@link clientIdsForRead}), so the two can never disagree on which login
+   * a person is.
+   *
+   * Tenant scope: `u."tenantId" = :tenantId` explicitly, on top of RLS on the
+   * runtime connection (`meru_app`, `app.current_tenant_id`). Case-insensitive
+   * by comparison, not by index — see resolveClientUserId's doc for why.
+   */
+  private userByEmail(tenantId: string, email: string): Promise<User | null> {
+    return this.dataSource
+      .getRepository(User)
+      .createQueryBuilder('u')
+      .where('u."tenantId" = :tenantId', { tenantId })
+      .andWhere('LOWER(u.email) = LOWER(:email)', { email })
+      .getOne();
+  }
+
+  /**
+   * Every `payments."clientId"` value that a staff caller's `?clientId=` means.
+   *
+   * The read-side mirror of {@link resolveClientUserId}. ImmiStack filters the
+   * ledger by the CRM person id it has to hand (the matter's `clientId`, the
+   * client page's route param), but the write path stores the resolved
+   * `users.id`. Filtering on the raw value returned an empty — and, by
+   * `hasNext: false`, *complete* — ledger for every charge raised since write
+   * resolution shipped: a pending charge read as "Nothing owing", and the
+   * matter payment gate opened on it (CLAUDE.md §5.2).
+   *
+   * Returns the distinct set of the raw id and, when it names a person in
+   * this tenant with an invited login, that login's `users.id`. The raw id is
+   * always kept: rows written before resolution shipped are stored under the
+   * person id itself.
+   *
+   * **Never throws.** On the write path an id that resolves to nobody is a
+   * 404/400, because a charge must belong to someone. On a read it is simply
+   * a filter that matches nothing, and the answer is an empty list. Nor does
+   * it refuse a staff `users.id` here: a read of rows stored under that id
+   * reveals nothing a staff caller cannot already list unfiltered.
+   *
+   * **Staff only.** Called solely when `forceClientId` is null, i.e. the
+   * caller has tenant-wide reach (`PaymentsController.clientScope`). A
+   * client-scoped caller's filter is their own id and is never resolved or
+   * widened from the query.
+   *
+   * Tenant scope: both lookups name `tenantId` explicitly (`users` by
+   * `{ id, tenantId }` and by `u."tenantId"`, `universal_entities` by
+   * `{ id, tenantId, type: person }`), on top of RLS on the connection. A
+   * person id from another tenant therefore resolves to nothing, and the
+   * `IN` filter the caller builds stays under `p."tenantId" = :tenantId`.
+   */
+  private async clientIdsForRead(
+    tenantId: string,
+    clientId: string,
+  ): Promise<string[]> {
+    const directUser = await this.dataSource
+      .getRepository(User)
+      .findOne({ where: { id: clientId, tenantId } });
+    if (directUser) return [clientId];
+
+    const person = await this.dataSource
+      .getRepository(UniversalEntity)
+      .findOne({ where: { id: clientId, tenantId, type: EntityType.PERSON } });
+    if (!person?.email) return [clientId];
+
+    const user = await this.userByEmail(tenantId, person.email);
+    return user && user.id !== clientId ? [clientId, user.id] : [clientId];
+  }
+
+  /**
+   * The `clientId` restriction shared by `list` and `summary`.
+   *
+   * The forced value overwrites rather than combines: a client must not be
+   * able to widen their view by passing ?clientId= for somebody else, so
+   * their own id is used as-is and the query value is never read.
+   */
+  private async applyClientFilter(
+    qb: SelectQueryBuilder<Payment>,
+    tenantId: string,
+    queryClientId: string | undefined,
+    forceClientId: string | null,
+  ): Promise<void> {
+    if (forceClientId) {
+      qb.andWhere('p."clientId" = :clientId', { clientId: forceClientId });
+      return;
+    }
+    if (!queryClientId) return;
+    // Tenant scope: `clientIdsForRead` resolves within `tenantId` only, and
+    // the caller's query builder already carries `p."tenantId" = :tenantId`.
+    const clientIds = await this.clientIdsForRead(tenantId, queryClientId);
+    qb.andWhere('p."clientId" IN (:...clientIds)', { clientIds });
+  }
+
   async list(
     tenantId: string,
     query: ListPaymentsQueryDto,
@@ -195,14 +284,12 @@ export class PaymentsService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 25;
 
+    // Tenant scope: explicit `p."tenantId"` here plus RLS on the connection.
     const qb = this.paymentRepo
       .createQueryBuilder('p')
       .where('p."tenantId" = :tenantId', { tenantId });
 
-    // The forced value overwrites rather than combines: a client must not be
-    // able to widen their view by passing ?clientId= for somebody else.
-    const clientId = forceClientId ?? query.clientId;
-    if (clientId) qb.andWhere('p."clientId" = :clientId', { clientId });
+    await this.applyClientFilter(qb, tenantId, query.clientId, forceClientId);
 
     // A client sees receivables only. Outbound rows are the firm's own
     // expenditure — what it paid the Department, what it spent on a police
@@ -247,12 +334,12 @@ export class PaymentsService {
     query: ListPaymentsQueryDto,
     forceClientId: string | null,
   ) {
+    // Tenant scope: explicit `p."tenantId"` here plus RLS on the connection.
     const qb = this.paymentRepo
       .createQueryBuilder('p')
       .where('p."tenantId" = :tenantId', { tenantId });
 
-    const clientId = forceClientId ?? query.clientId;
-    if (clientId) qb.andWhere('p."clientId" = :clientId', { clientId });
+    await this.applyClientFilter(qb, tenantId, query.clientId, forceClientId);
     if (query.entityId)
       qb.andWhere('p."entityId" = :entityId', { entityId: query.entityId });
 

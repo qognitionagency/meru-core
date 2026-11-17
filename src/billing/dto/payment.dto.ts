@@ -138,8 +138,13 @@ export class ListPaymentsQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'Filter by client. Ignored for a client-role caller, who is always ' +
-      'forced to their own id.',
+      'Filter by client. Accepts EITHER their users.id OR the ' +
+      'universal_entities.id (type=person) of their CRM record — the same two ' +
+      'forms `POST /payments` accepts. A person id matches rows stored under ' +
+      'the users.id it resolves to (by email, within this tenant) **and** ' +
+      'rows stored under the person id itself. An id that names nobody ' +
+      'returns an empty result, not an error. **Ignored for a client-role ' +
+      'caller**, who is always forced to their own id.',
   })
   @IsOptional()
   @IsUUID()
@@ -216,7 +221,12 @@ export class ScheduleFeesDto {
   @IsUUID()
   entityId: string;
 
-  @ApiProperty({ description: 'users.id of the client who owes these' })
+  @ApiProperty({
+    description:
+      'The client who owes these — their users.id OR their CRM person ' +
+      'entity id, resolved to the users.id server-side exactly as ' +
+      '`POST /payments` does (400 if the person has not been invited).',
+  })
   @IsUUID()
   clientId: string;
 

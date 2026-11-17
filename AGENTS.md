@@ -1626,3 +1626,41 @@ branch is not a change the portals can see (`/api-json` is the check).
    `src/integrations/integrations-client-authz.spec.ts`,
    `src/workflow/workflow-ownership-rule.spec.ts` (internal: workflow
    ownership now asks `CrmAccessService.applyScope`, no contract change).
+
+10. **2026-11-17 — `GET /payments` and `GET /payments/summary` accept a person
+    entity id or a `users.id` for `?clientId=`.** *Not deployed* — uncommitted
+    on branch `wave0/back-online`. No migration.
+    - **The defect (Owen, pre-existing):** writes (`POST /payments`,
+      `POST /payments/schedule`) store the client's resolved `users.id`, but
+      the reads filtered on the raw query value. ImmiStack filters with the CRM
+      person id, so every charge raised since write-side resolution shipped
+      came back as `[]` with `hasNext: false`: a complete, empty ledger. The
+      matter payment gate opened on a pending charge, and the client page said
+      "Nothing owing".
+    - **Now:** for a staff-or-above caller, `?clientId=` matches rows stored
+      under the raw id **and** under the `users.id` that a person id resolves
+      to (by email, within the caller's tenant). The raw id is kept, so rows
+      written before resolution shipped, which are stored under the person
+      id, still match. An id that names nobody, or a person with no invited
+      login, returns an empty page or zero totals, **not** a 400/404 as the
+      write path does. `summary` matches exactly the rows `list` returns.
+    - **Unchanged:** a client-role caller is still forced to their own id and
+      to `inbound` only; `?clientId=` cannot widen it. The tenant scope is
+      explicit `"tenantId"` on every lookup plus RLS on the connection, so a
+      person id from another tenant resolves to nothing.
+      (`PaymentsService.clientIdsForRead` / `applyClientFilter`.)
+    - **Consumers (immistack, grepped 2026-11-17), all of which start working
+      with no frontend change:** the matter workspace
+      (`components/matter/matter-workspace.tsx:97`, `matter.clientId`),
+      which feeds the stage panel's payment gate
+      (`components/matter/stage-panel.tsx`, via `paymentsState`), and the
+      client detail page (`app/(workspace)/clients/[id]/page.tsx:154`, route
+      param). Client-portal screens call with no `clientId` and are unaffected.
+    - **Not covered, outside `src/billing`:** `DocumentGenerationService`
+      (`src/documents/document-generation.service.ts:291-297`) loads a
+      document's payments with `{ tenantId, clientId: entityId }`, so it has
+      the same raw-id mismatch for rows stored under the resolved `users.id`
+      when generating against a person record. Rows that also carry the matter
+      `entityId` still match through the other branch. This is open.
+    - Spec: `src/billing/payments-client-resolution.service.spec.ts`
+      ("reading by clientId").

@@ -403,6 +403,48 @@ pack whose version is not strictly greater, so a prose-only edit reaches storage
 bump. Two new ADRs on disk: `docs/adr/0010-client-and-case-numbering.md`,
 `docs/adr/0011-record-identity-and-unnamed-client-contract.md`.
 
+### 0.6 ADR 0023 D15 — the audit trail's chain lock, reconciler, export fields and `/health/ready` (2026-11-17)
+
+**Uncommitted on branch `wave0/back-online`, not deployed.** What is in the tree, read from the
+code on 2026-11-17, not from the ADR:
+
+- **The chain cannot fork (D15 item 3).** `AuditService.logEvent` reads the tip and inserts in
+  one transaction that first takes `pg_advisory_xact_lock` on a per-tenant key
+  (`auditChainLockKey`: first 8 bytes of SHA-256(`audit_chain:` + tenantId)). Two writes in one
+  tenant serialise; different tenants do not wait on each other. The timestamp is taken after the
+  lock and forced past the tip's. Bounded with `SET LOCAL lock_timeout = '5s'` and
+  `statement_timeout = '15s'`; a timeout (55P03 / 57014) is **503** "Audit log busy — write
+  refused, retry", which strict callers already treat as refused. `[NEEDS DATA: 5s/15s are
+  proposals, not measured p99s — Anton/Jonas.]` Specs: `src/audit/audit-chain-lock.spec.ts`,
+  `audit-chain-lock-timeout.spec.ts`. **Consequence learned the hard way (Owen's gate):** anything
+  an unauthenticated caller can trigger must not write to `audit_logs`, or it queues on this lock
+  — which is why sign-in attempts moved to `auth_attempts` (§8.1 item 8).
+- **The reconciler (D15 item 2).** Job `audit-reconcile`, on the daily tick (the sixteenth job in
+  `JOB_CADENCE_MINUTES`, `src/jobs/job-catalogue.ts`). Finds `*.requested` rows older than
+  `AUDIT_RECONCILE_AFTER_MINUTES` (default **15**, a bad value falls back loudly) with no row
+  sharing their `changeId`, and writes `<x>.reconciled` with `context.outcome` ∈ `applied |
+  not_applied | indeterminate`. It never assumes `applied`. **No state reader is registered yet,
+  so every outcome today is `indeterminate` / `no_state_reader`.** Runs under `runAsSystem`; every
+  read after the candidate scan carries the request row's `tenantId`, and the reconciled row is
+  written into that tenant. Each reconciled row is logged at error as the alert
+  `[NEEDS DATA: the alert channel — ADR 0023 §8 item 29, Jonas]`.
+  `src/audit/audit-reconciler.service.ts`, `audit-reconcile.store.ts`; specs
+  `audit-reconciler.spec.ts`, `audit-reconcile-scan.spec.ts`,
+  `src/jobs/job-dispatch-audit-reconcile.spec.ts`.
+- **Export fields (D13/D15).** CSV and XML audit exports now carry four `context` columns,
+  appended after the existing ones so a spreadsheet keeps its layout: `changeId`, `event`,
+  `reason`, `impersonatedBy` (structured values as JSON; XML-escaped, so a value cannot forge an
+  element). JSON exports already carried the whole row. Spec: `src/audit/audit-export.spec.ts`.
+- **`GET /health/ready`.** `@Public()`, runs `SELECT 1`, answers `{status:'ready',database:'up'}`
+  or **503** "Database unreachable" (detail logged, not returned). Spec:
+  `src/health/health-ready.spec.ts`. **Not yet wired as the probe:** `render.yaml` still sets
+  `healthCheckPath: /api/v1/health` — Jonas's call whether to point it at `/health/ready`.
+- **Still outstanding from D15**, so nobody reads the above as the whole ADR: item 1's
+  `ConflictException` → `no_row_updated` classifier in `auditedChange`, and item 5's
+  `{ id, tenantId }` lookup plus conditional update in `verifyMfaSetup`/`setupMfa`. (Item 5's
+  "refuse when MFA is already enabled, before the request row" **is** in the tree as of this
+  round — §8.1 item 8.)
+
 ---
 
 ## 1. Scope, measured
@@ -1485,6 +1527,24 @@ branch is not a change the portals can see (`/api-json` is the check).
      `src/iam/mfa-disable.spec.ts`.
    - **Dashboards and trends are own-scoped for non-staff callers** — see the
      correction under item 7.
+   - **`POST /workflows` and `POST /workflows/instances` are staff-and-above**
+     (403 to a client), and starting an instance on an entity the caller does
+     not own is 404 for anyone without tenant-wide reach. No app calls either
+     route (grepped all three, 2026-11-17). Spec:
+     `src/workflow/workflow-create-start-authz.spec.ts`.
+   - **Webhook notifications** (`type: webhook`) are sent through the egress
+     guard: a non-public `metadata.url` is never contacted, redirects are not
+     followed, and `deliveryAttempts[].error` reads "webhook target refused
+     by egress policy" or "webhook request failed" (or "webhook returned HTTP
+     n") instead of the transport's text. Spec:
+     `src/notifications/notification-webhook-egress.spec.ts`.
+   - **Fixed reasons instead of upstream text** in `{ success: false, error }`
+     bodies from the AI-assisted task, workflow, document-extraction and form
+     helpers, and in S3 storage-class / multipart and Supabase storage
+     errors. Display the message; do not parse it. Specs:
+     `src/common/error-text-in-200-bodies.spec.ts`,
+     `src/storage/providers/s3-error-text.spec.ts`,
+     `src/storage/providers/supabase.provider.spec.ts`.
 
 9. **2026-11-17 — second FIX round on Owen's gate (w1-18, w1-17, w1-13, and
    Anton's client-reachable routes).** *Not deployed* — uncommitted on branch

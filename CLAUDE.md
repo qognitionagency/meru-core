@@ -629,12 +629,12 @@ exception (no `tenantId`), and **47** rows in `migrations` matching 47 files and
 behind `CronSecretGuard`, which fails closed when `CRON_SECRET` is unset. They
 accept GET as well as POST because Vercel Cron only issues GET.
 
-Fifteen jobs, in `JOB_CADENCE_MINUTES` (`jobs.controller.ts`):
+Seventeen jobs, in `JOB_CADENCE_MINUTES` (`src/jobs/job-catalogue.ts`):
 
 | Route | Runs |
 |---|---|
 | `/jobs/tick?scope=fast` | queue-drain, scheduled-jobs, recurring-tasks, scheduled-notifications, notification-dispatch, sla-watchdog, alert-rules, messaging-sequences, scheduled-reports |
-| `/jobs/tick?scope=daily` | daily-billing, regulatory-radar, audit-archive, watchlist-ingest, rescreening, digest-emails |
+| `/jobs/tick?scope=daily` | daily-billing, regulatory-radar, audit-archive, audit-reconcile, watchlist-ingest, rescreening, digest-emails, auth-attempts-prune |
 | `/jobs/<name>` | one job by name — e.g. `POST /jobs/watchlist-ingest` (AGENTS.md §5.1) |
 
 `/jobs/tick` is cadence-aware and idempotent. Dispatch stops after 45s and

@@ -587,10 +587,11 @@ export class FormBuilderService {
       this.logger.error(
         `Failed to extract form data with AI: ${error.message}`,
       );
+      // Fixed reason; the provider's text (hosts, model ids) stays in the log.
       return {
         success: false,
         extractedData: null,
-        error: error.message,
+        error: 'Form data extraction unavailable',
       };
     }
   }
@@ -623,10 +624,11 @@ export class FormBuilderService {
       };
     } catch (error) {
       this.logger.error(`Failed to validate form with AI: ${error.message}`);
+      // Fixed reason; the provider's text (hosts, model ids) stays in the log.
       return {
         success: false,
         validationResult: null,
-        error: error.message,
+        error: 'Form validation unavailable',
       };
     }
   }
@@ -784,8 +786,15 @@ export class FormBuilderService {
           const analysis = await this.documentHubService.analyzeDocument(docId);
           return { documentId: docId, ...analysis };
         } catch (error) {
-          this.logger.error(`Failed to process document ${docId}:`, error);
-          return { documentId: docId, success: false, error: error.message };
+          // Fixed reason: returned AND stored in submission metadata.
+          this.logger.error(
+            `Failed to process document ${docId}: ${error?.message}`,
+          );
+          return {
+            documentId: docId,
+            success: false,
+            error: 'Document processing failed',
+          };
         }
       }),
     );
@@ -824,10 +833,13 @@ export class FormBuilderService {
           );
         } catch (error) {
           this.logger.error(
-            `Failed to extract data from document ${doc.id}:`,
-            error,
+            `Failed to extract data from document ${doc.id}: ${error?.message}`,
           );
-          return { documentId: doc.id, success: false, error: error.message };
+          return {
+            documentId: doc.id,
+            success: false,
+            error: 'Document data extraction failed',
+          };
         }
       }),
     );

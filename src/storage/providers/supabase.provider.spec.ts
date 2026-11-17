@@ -164,6 +164,22 @@ describe('SupabaseStorageProvider', () => {
     });
   });
 
+  // w1-07 leftover (Owen's gate): `fail()` put storage-js's own text in the
+  // 400 body, which the global filter passes through to the caller.
+  it('does not put the storage-js message in the exception, and still logs it', async () => {
+    const { driver, bucket } = build();
+    const logged = jest.spyOn((driver as any).logger, 'error').mockImplementation(() => undefined);
+    bucket.upload.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'bucket docs at https://internal.supabase.example quota exceeded' },
+    });
+    const err = await driver.upload(Buffer.from('x'), 'tenants/t1/y').catch((e) => e);
+    expect(err.status).toBe(400);
+    expect(JSON.stringify(err.getResponse())).not.toContain('internal.supabase.example');
+    expect(err.message).toBe('upload failed');
+    expect(JSON.stringify(logged.mock.calls)).toContain('internal.supabase.example');
+  });
+
   it('reads object metadata and reports the single Supabase storage class', async () => {
     const { driver } = build();
     const meta = await driver.getObjectMetadata('tenants/t1/x');

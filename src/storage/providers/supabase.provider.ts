@@ -107,7 +107,9 @@ export class SupabaseStorageProvider implements ObjectStorageDriver {
     if (/not found|does not exist/i.test(message)) {
       throw new NotFoundException(`Object not found`);
     }
-    throw new BadRequestException(`${op} failed: ${message}`);
+    // The operation name only: storage-js's text names hosts and buckets, and
+    // an HttpException message reaches the caller. Logged above.
+    throw new BadRequestException(`${op} failed`);
   }
 
   async upload(

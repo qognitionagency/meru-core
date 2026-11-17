@@ -211,9 +211,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
         .promise();
     } catch (error) {
       this.logger.error(`S3 change storage class failed: ${error.message}`);
-      throw new BadRequestException(
-        `Storage class change failed: ${error.message}`,
-      );
+      throw new BadRequestException('Storage class change failed');
     }
   }
 
@@ -239,9 +237,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
       this.logger.error(
         `S3 initiate multipart upload failed: ${error.message}`,
       );
-      throw new BadRequestException(
-        `Multipart upload initiation failed: ${error.message}`,
-      );
+      throw new BadRequestException('Multipart upload initiation failed');
     }
   }
 
@@ -283,9 +279,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
       this.logger.error(
         `S3 complete multipart upload failed: ${error.message}`,
       );
-      throw new BadRequestException(
-        `Multipart upload completion failed: ${error.message}`,
-      );
+      throw new BadRequestException('Multipart upload completion failed');
     }
   }
 

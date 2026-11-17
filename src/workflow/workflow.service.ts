@@ -1233,10 +1233,11 @@ export class WorkflowEngineService {
       this.logger.error(
         `Failed to get workflow recommendations: ${error.message}`,
       );
+      // Fixed reason; the provider's text (hosts, model ids) stays in the log.
       return {
         success: false,
         recommendation: null,
-        error: error.message,
+        error: 'Workflow recommendation unavailable',
       };
     }
   }
@@ -1353,8 +1354,16 @@ export class WorkflowEngineService {
             extractionSchema,
           );
         } catch (error) {
-          this.logger.error(`Failed to process document ${docId}:`, error);
-          return { documentId: docId, success: false, error: error.message };
+          // Fixed reason: this result is returned AND stored in the
+          // instance context. The detail stays in the log.
+          this.logger.error(
+            `Failed to process document ${docId}: ${error?.message}`,
+          );
+          return {
+            documentId: docId,
+            success: false,
+            error: 'Document processing failed',
+          };
         }
       }),
     );

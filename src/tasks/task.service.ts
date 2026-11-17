@@ -779,10 +779,11 @@ export class TaskService {
       };
     } catch (error) {
       this.logger.error(`Failed to suggest task: ${error.message}`);
+      // Fixed reason; the provider's text (hosts, model ids) stays in the log.
       return {
         success: false,
         suggestion: null,
-        error: error.message,
+        error: 'Task suggestion unavailable',
       };
     }
   }

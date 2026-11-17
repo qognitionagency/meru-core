@@ -35,6 +35,8 @@ describe('S3StorageProvider — SDK error text is logged, not returned', () => {
       copyObject: failing,
       headObject: failing,
       listObjectsV2: failing,
+      createMultipartUpload: failing,
+      completeMultipartUpload: failing,
     };
     (p as any).logger = { error: jest.fn(), warn: jest.fn(), log: jest.fn() };
     return p;
@@ -47,6 +49,13 @@ describe('S3StorageProvider — SDK error text is logged, not returned', () => {
     ['copy', (p) => p.copy('tenants/t/a', 'tenants/t/b')],
     ['getObjectMetadata', (p) => p.getObjectMetadata('tenants/t/k')],
     ['listObjects', (p) => p.listObjects('tenants/t/')],
+    // w1-07 leftovers (Owen's gate): the three that still interpolated it.
+    ['changeStorageClass', (p) => p.changeStorageClass('tenants/t/k', 'standard' as any)],
+    ['initiateMultipartUpload', (p) => p.initiateMultipartUpload('tenants/t/k')],
+    [
+      'completeMultipartUpload',
+      (p) => p.completeMultipartUpload('u1', 'tenants/t/k', [{ partNumber: 1, etag: 'e' }]),
+    ],
   ];
 
   it.each(calls)('%s does not put the SDK message in the exception', async (_name, call) => {

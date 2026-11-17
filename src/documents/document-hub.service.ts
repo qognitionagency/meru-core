@@ -389,12 +389,12 @@ export class DocumentHubService {
       };
     } catch (error) {
       this.logger.error(
-        `Failed to extract data from document: ${documentId}`,
-        error,
+        `Failed to extract data from document ${documentId}: ${error?.message}`,
       );
+      // Fixed reason; the provider's text (hosts, model ids) stays in the log.
       return {
         success: false,
-        error: error.message,
+        error: 'Document data extraction failed',
       };
     }
   }

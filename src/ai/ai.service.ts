@@ -28,6 +28,7 @@ import { AnalyticsService } from '../analytics/analytics.service';
 import { AuditService } from '../audit/audit.service';
 import { VerticalPackService } from '../tenant/services/vertical-pack.service';
 import { ConnectorsService } from '../integrations/services/connectors.service';
+import { egressGuardedFetch } from '../common/egress-guard';
 import type { PackPrompt } from '../../packages/config-packs/_schema/pack.schema';
 import { Actor, SYSTEM_ACTOR, hasTenantWideReach } from '../common/access';
 import type { UpsertPromptDto } from './dto/ai-request.dto';
@@ -713,6 +714,10 @@ export class AiService {
           baseURL: provider.baseUrl ?? undefined,
           maxRetries: 3,
           timeout: 30000,
+          // The baseUrl was checked when it was saved, but DNS can change
+          // since. Every request re-resolves and re-checks the host and never
+          // follows a redirect (Anton, 2026-11-17, #4).
+          fetch: egressGuardedFetch,
         }),
         defaultModel: provider.model,
         source: 'tenant_connector',

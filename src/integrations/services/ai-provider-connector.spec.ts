@@ -104,16 +104,24 @@ describe('ConnectorsService — AI providers', () => {
   });
 
   it('accepts a custom self-hosted endpoint with no API key', async () => {
-    // A vLLM or Ollama instance on a private network legitimately needs none.
+    // A self-hosted vLLM or Ollama legitimately needs no key. Since
+    // 2026-11-17 (Anton #4) it must be set by a platform_admin and be
+    // publicly routable — a private-network endpoint is refused; see
+    // connector-egress.spec.ts. DNS is stubbed: no network in this test.
+    const lookup = jest
+      .spyOn(require('node:dns').promises, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     const saved = await service.upsert(
       't1',
       'immigration',
       'custom-openai-compatible',
       {
         enabled: true,
-        credentials: { baseUrl: 'http://vllm.internal:8000/v1', model: 'llama-3.1-70b' },
+        credentials: { baseUrl: 'https://vllm.example.com/v1', model: 'llama-3.1-70b' },
       },
+      { id: 'op-1', roles: ['platform_admin'] },
     );
+    lookup.mockRestore();
 
     expect(saved.hasCredentials).toBe(true);
     expect('credentials' in saved).toBe(false);

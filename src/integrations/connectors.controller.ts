@@ -22,7 +22,7 @@ import { ConnectorsService } from './services/connectors.service';
 import { UpsertConnectorDto } from './dto/upsert-connector.dto';
 
 interface ConnectorRequest {
-  user: { id: string; tenantId: string };
+  user: { id: string; tenantId: string; roles: string[]; email?: string };
   tenantVertical: string | null;
 }
 
@@ -71,6 +71,8 @@ export class ConnectorsController {
       req.tenantVertical,
       code,
       dto,
+      // The service decides who may set a `baseUrl`, so it needs the caller.
+      { id: req.user.id, roles: req.user.roles, email: req.user.email },
     );
   }
 }

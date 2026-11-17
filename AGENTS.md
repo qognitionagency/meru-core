@@ -1370,3 +1370,11 @@ branch is not a change the portals can see (`/api-json` is the check).
      <requestId>" (503: "A dependency is temporarily unavailable. Reference:
      …"). The detail is in the server log under `meta.requestId`. S3 failures
      no longer carry the SDK text (Anton #5). Display the message; do not parse it.
+   - **`PUT /integrations/connectors/:code`:** setting a `credentials.baseUrl`
+     needs **platform_admin** (else **403**), and any `baseUrl` that is not
+     public http(s) (loopback, link-local/metadata, RFC1918, CGNAT, private
+     IPv6, or a host resolving to one) is **400** (Anton #4). Firm admins still
+     connect OpenAI, Anthropic and DeepSeek with a key alone.
+     **Product consequence, needs an operator decision:** a self-hosted model on
+     a private network (`custom-openai-compatible` → `http://vllm.internal`)
+     can no longer be configured at all.

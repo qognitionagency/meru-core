@@ -21,6 +21,7 @@ import {
 import * as https from 'https';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { assertEgressAllowed, guardedLookup } from '../common/egress-guard';
 import {
   Workflow,
   WorkflowStatus,
@@ -1036,6 +1037,12 @@ export class WorkflowEngineService {
       return;
     }
 
+    // The payload carries the instance's full `context`. Refuse any URL that
+    // is not public http(s) before anything is built or sent, and dial
+    // through `guardedLookup` below so the address connected to is the one
+    // checked (Anton, 2026-11-17, #14).
+    await assertEgressAllowed(String(url));
+
     const payload = JSON.stringify({
       event: 'workflow.action',
       instanceId: instance.id,
@@ -1087,6 +1094,7 @@ export class WorkflowEngineService {
           method: method.toUpperCase(),
           headers,
           timeout: 10_000,
+          lookup: guardedLookup,
         },
         (res) => {
           res.resume(); // drain response

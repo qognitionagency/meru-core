@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
@@ -10,6 +14,12 @@ import {
   decryptCredentials,
   encryptCredentials,
 } from '../../core/crypto/credential-cipher';
+import type { Actor } from '../../common/access';
+import { PlatformRole } from '../../iam/enums/platform-role.enum';
+import {
+  assertEgressAllowed,
+  EgressRefusedError,
+} from '../../common/egress-guard';
 
 /**
  * Which regulator adapters each vertical may connect. This is deliberately the
@@ -215,7 +225,30 @@ export class ConnectorsService {
     vertical: string | null,
     adapterCode: string,
     input: UpsertConnectorInput,
+    actor?: Actor,
   ): Promise<Omit<TenantConnector, 'credentials'> & { hasCredentials: boolean }> {
+    // A `baseUrl` decides where the tenant's key and data are POSTed. Until a
+    // provider allow-list exists, only platform_admin may set one, and every
+    // value must pass the egress guard (Anton, 2026-11-17, #4). Checked before
+    // anything is read or written; a missing actor fails closed. Firm admins
+    // still connect the named providers, which use the catalogue's URL.
+    const requestedBaseUrl = input.credentials?.baseUrl;
+    if (requestedBaseUrl !== undefined && requestedBaseUrl !== null) {
+      if (!actor?.roles?.includes(PlatformRole.PLATFORM_ADMIN)) {
+        throw new ForbiddenException(
+          'Only a platform administrator can set a connector baseUrl',
+        );
+      }
+      try {
+        await assertEgressAllowed(String(requestedBaseUrl));
+      } catch (err) {
+        if (err instanceof EgressRefusedError) {
+          throw new BadRequestException(`baseUrl refused — ${err.message}`);
+        }
+        throw err;
+      }
+    }
+
     const isAiProvider = AI_PROVIDER_CODES.includes(adapterCode);
     const allowed = (vertical && VERTICAL_ADAPTERS[vertical]) ?? [];
 

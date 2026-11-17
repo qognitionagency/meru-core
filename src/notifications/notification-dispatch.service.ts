@@ -10,6 +10,10 @@ import {
 import { User } from '../iam/entities/user.entity';
 import { MailService } from '../core/mail/mail.service';
 import { TenantContext } from '../core/tenancy/tenant-context';
+import {
+  EgressRefusedError,
+  egressGuardedFetch,
+} from '../common/egress-guard';
 
 /** Canonical UUID shape, used to keep non-uuid values out of uuid columns. */
 const UUID_PATTERN =
@@ -218,6 +222,16 @@ export class NotificationDispatchService {
    * system. When no secret is configured the call still goes out and the
    * signature header is omitted, so the receiver can tell the difference
    * rather than trusting an empty string.
+   *
+   * **Egress (Owen's gate, 2026-11-17, HIGH).** The URL is staff-supplied
+   * (`POST /notifications`, `metadata.url`), and this used the global
+   * `fetch` with no host check and followed redirects — a staff user could
+   * aim it at cloud metadata or the private network, and the exception text
+   * stored on the row told them which internal addresses answered. It now
+   * goes through `egressGuardedFetch`: scheme, literal and DNS checked, the
+   * dial pinned to the checked address, no redirect followed. The stored
+   * attempt carries a fixed reason (or the receiver's own HTTP status); the
+   * detail goes to the log only.
    */
   private async dispatchWebhook(notification: Notification): Promise<boolean> {
     const metadata = (notification.metadata ?? {}) as {
@@ -259,7 +273,7 @@ export class NotificationDispatchService {
     }
 
     try {
-      const response = await fetch(url, {
+      const response = await egressGuardedFetch(url, {
         method: 'POST',
         headers,
         body: payload,
@@ -280,10 +294,16 @@ export class NotificationDispatchService {
       this.recordAttempt(notification, true);
       return true;
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `Webhook notification ${notification.id} not delivered: ${detail}`,
+      );
       this.recordAttempt(
         notification,
         false,
-        `webhook request failed: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof EgressRefusedError
+          ? 'webhook target refused by egress policy'
+          : 'webhook request failed',
       );
       return false;
     }

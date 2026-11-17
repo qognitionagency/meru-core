@@ -1365,3 +1365,8 @@ branch is not a change the portals can see (`/api-json` is the check).
      non-boolean value is a 400. A `client` token's text search is now
      own-scoped on every branch, including the AI one (Anton #3). Nothing in
      the three apps sends `sortBy`, `sortOrder` or `includeAI` (grepped).
+   - **5xx messages are generic.** Any error that is not a deliberate
+     `HttpException` answers "An unexpected error occurred. Reference:
+     <requestId>" (503: "A dependency is temporarily unavailable. Reference:
+     …"). The detail is in the server log under `meta.requestId`. S3 failures
+     no longer carry the SDK text (Anton #5). Display the message; do not parse it.

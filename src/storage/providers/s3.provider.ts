@@ -104,7 +104,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
       };
     } catch (error) {
       this.logger.error(`S3 upload failed: ${error.message}`);
-      throw new BadRequestException(`Upload failed: ${error.message}`);
+      throw new BadRequestException('Upload failed');
     }
   }
 
@@ -120,7 +120,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
       return result.Body as Buffer;
     } catch (error) {
       this.logger.error(`S3 download failed: ${error.message}`);
-      throw new NotFoundException(`File not found: ${error.message}`);
+      throw new NotFoundException('File not found');
     }
   }
 
@@ -134,7 +134,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
         .promise();
     } catch (error) {
       this.logger.error(`S3 delete failed: ${error.message}`);
-      throw new BadRequestException(`Delete failed: ${error.message}`);
+      throw new BadRequestException('Delete failed');
     }
   }
 
@@ -149,7 +149,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
         .promise();
     } catch (error) {
       this.logger.error(`S3 copy failed: ${error.message}`);
-      throw new BadRequestException(`Copy failed: ${error.message}`);
+      throw new BadRequestException('Copy failed');
     }
   }
 
@@ -327,7 +327,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
       };
     } catch (error) {
       this.logger.error(`S3 get metadata failed: ${error.message}`);
-      throw new NotFoundException(`File not found: ${error.message}`);
+      throw new NotFoundException('File not found');
     }
   }
 
@@ -359,7 +359,7 @@ export class S3StorageProvider implements ObjectStorageDriver {
       }));
     } catch (error) {
       this.logger.error(`S3 list objects failed: ${error.message}`);
-      throw new BadRequestException(`List objects failed: ${error.message}`);
+      throw new BadRequestException('List objects failed');
     }
   }
 

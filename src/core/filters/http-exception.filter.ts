@@ -124,7 +124,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
   }
 
   /** Builds a MeruError from exception */
-  private buildError(exception: unknown, status: number): MeruError {
+  private buildError(
+    exception: unknown,
+    status: number,
+    requestId: string,
+  ): MeruError {
     const httpException = exception instanceof HttpException ? exception : null;
     let code = this.mapStatusToErrorCode(status, httpException);
 
@@ -170,8 +174,17 @@ export class AllExceptionsFilter implements ExceptionFilter {
           code = explicitCode as MeruErrorCode;
         }
       }
-    } else if (exception instanceof Error) {
-      message = exception.message;
+    } else {
+      // Never the exception's own text. Anything that is not an
+      // HttpException was not written for the caller: a driver error names
+      // tables, columns and statement fragments, and an SDK error can carry
+      // an upstream response body. Returning it turned the ORDER BY injection
+      // into an error-based read (Anton, 2026-11-17, #5). The detail is in
+      // the server log under this request id.
+      message =
+        status === HttpStatus.SERVICE_UNAVAILABLE
+          ? `A dependency is temporarily unavailable. Reference: ${requestId}`
+          : `An unexpected error occurred. Reference: ${requestId}`;
     }
 
     return {
@@ -194,9 +207,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
           ? HttpStatus.SERVICE_UNAVAILABLE
           : HttpStatus.INTERNAL_SERVER_ERROR;
 
-    const meruError = this.buildError(exception, status);
     const requestId =
       (request.headers['x-request-id'] as string) || randomUUID();
+    const meruError = this.buildError(exception, status, requestId);
 
     // Structured Logging with Meru error code
     this.logger.error(
@@ -206,6 +219,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
         status,
         errorCode: meruError.code,
         message: meruError.message,
+        // The real text, server-side only, for anything the caller was
+        // given a generic message for.
+        ...(!(exception instanceof HttpException) && {
+          cause:
+            exception instanceof Error
+              ? `${exception.name}: ${exception.message}`
+              : String(exception),
+        }),
         timestamp: new Date().toISOString(),
         path: request.url,
         method: request.method,

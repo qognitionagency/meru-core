@@ -1301,3 +1301,35 @@ branch is not a change the portals can see (`/api-json` is the check).
      page does not show `context.requested` or `context.changeId`; surfacing
      them is optional frontend work. No app handles a 503 on these routes
      specifically yet.
+
+6. **2026-11-17 — nested impersonation and impersonated sign-off are refused.**
+   *Not deployed* — on branch `wave0/back-online`.
+   - `POST /tenants/:id/impersonate` now answers **403** (a) when the caller
+     holds an impersonation token (`NoImpersonationGuard`), and (b) when `:id`
+     is the caller's own tenant. Both are refused before `runAsGod`, so no
+     CRITICAL row is written for an impersonation that did not happen.
+     (c) `IamService.issueImpersonationToken` never mints a token for a user
+     holding `platform_admin`: it takes the earliest active user who does not
+     hold it, and answers **400** "no active user that may be impersonated"
+     if there is none. Before this, an operator could impersonate into the
+     platform tenant, land on a `platform_admin`, impersonate again, and the
+     second token's `imp` named the impersonated admin instead of the operator.
+   - `PUT /tenants/:id/entitlements` refuses an impersonation token (403).
+     `GET /tenants/:id/entitlements|branding|connectors` still serve the
+     caller's own tenant under impersonation, but the cross-tenant (God View)
+     branch now answers 403 to an impersonation session, because its
+     `runAsGod` row would name the impersonated user as the actor.
+   - `POST /workflows/instances/:id/transition` on a transition with
+     `permissions.requiresSignOff` answers **403** to an impersonation session,
+     before the credential is read. A sign-off is the practitioner's own act;
+     an operator could otherwise sign off under a firm member's credential and
+     `history[].signedOffBy` would name that member. Other transitions are
+     unchanged. No pack ships `requiresSignOff: true` yet (ADR 0027), so
+     nothing live hits this today.
+   - **Consumers (grepped 2026-11-17):** `meru-dashboard`'s tenant-detail
+     "Start 15-minute session" (`app/platform/tenants/[id]/page.tsx`) toasts
+     the error message, so the own-tenant refusal reads as "Cannot impersonate
+     a user in your own tenant". Nothing else calls these routes under
+     impersonation. Specs: `src/iam/nested-impersonation.spec.ts`,
+     `src/iam/operator-impersonation-guard.spec.ts`,
+     `src/workflow/workflow-signoff.spec.ts`.

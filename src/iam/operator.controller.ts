@@ -18,6 +18,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { PolicyGuard } from './guards/policy.guard';
+import { NoImpersonationGuard } from './guards/no-impersonation.guard';
 import { Roles } from './decorators/roles.decorator';
 import { PlatformRole } from './enums/platform-role.enum';
 import { TenantProvisioningService } from './tenant-provisioning.service';
@@ -77,6 +78,19 @@ export class OperatorController {
   ): Promise<T> {
     if (id === req.user.tenantId) return work();
 
+    // An impersonation session never takes the God-View path. `runAsGod`
+    // records `req.user.id` as the actor, which under impersonation is the
+    // impersonated user, not the operator — the CRITICAL row would name the
+    // wrong person. (`issueImpersonationToken` no longer mints a token for a
+    // platform_admin, so this is the second wall, not the first.) Own-tenant
+    // reads above stay open: they are what that user could already see.
+    if (req.user.impersonatedBy) {
+      throw new ForbiddenException(
+        "Not available to an impersonation session: reading another tenant's " +
+          `${reason} requires the operator's own session`,
+      );
+    }
+
     if (!(req.user.roles ?? []).includes(PlatformRole.PLATFORM_ADMIN)) {
       throw new ForbiddenException(
         `Reading another tenant's ${reason} requires platform_admin`,
@@ -115,6 +129,9 @@ export class OperatorController {
 
   @Put(':id/entitlements')
   @Roles(PlatformRole.PLATFORM_ADMIN)
+  // A God-View write: its runAsGod row names `req.user.id`, which under
+  // impersonation is not the operator. Operator's own session only.
+  @UseGuards(NoImpersonationGuard)
   @ApiOperation({
     summary: "Override another tenant's entitlements, no plan ceiling (God View)",
     description:
@@ -213,6 +230,10 @@ export class OperatorController {
 
   @Post(':id/impersonate')
   @Roles(PlatformRole.PLATFORM_ADMIN)
+  // Nested impersonation launders attribution: the second token's `imp`
+  // would name whoever the first one impersonated. Runs after the class's
+  // AuthGuard('jwt'), so `req.user` is set.
+  @UseGuards(NoImpersonationGuard)
   @ApiOperation({
     summary: 'Mint a 15-minute support token for another tenant (God View)',
     description:
@@ -223,12 +244,19 @@ export class OperatorController {
   })
   @ApiParam({ name: 'id', description: 'Tenant id to act inside' })
   @ApiResponse({ status: 201, description: 'Impersonation token issued' })
-  @ApiResponse({ status: 403, description: 'Requires platform_admin' })
+  @ApiResponse({
+    status: 403,
+    description:
+      "Requires platform_admin; refused for the caller's own tenant and for " +
+      'an impersonation session',
+  })
   @ApiResponse({
     status: 400,
-    description: 'Tenant has no active user to impersonate',
+    description:
+      'Tenant has no active user that may be impersonated (platform_admin ' +
+      'accounts never are)',
   })
-  impersonate(
+  async impersonate(
     @Request() req: AuthenticatedRequest,
     @Param('id') id: string,
     @Body() dto: ImpersonateDto,
@@ -236,6 +264,17 @@ export class OperatorController {
     // Not routed through `forTenant`: impersonating your own tenant is not a
     // lesser case of this operation, it is a meaningless one, and the
     // @Roles guard above already refuses non-operators.
+    //
+    // Refused outright, before `runAsGod` writes a CRITICAL row for an
+    // impersonation that will not happen. Own tenant is the platform tenant
+    // for an operator, whose users are platform_admins: impersonating one
+    // would let the session impersonate again under a name that is not the
+    // operator's (Anton). `issueImpersonationToken` refuses it too.
+    if (id === req.user.tenantId) {
+      throw new ForbiddenException(
+        'Cannot impersonate a user in your own tenant',
+      );
+    }
     //
     // The starkest instance of the audit-tenant bug this file used to carry:
     // `req.user.tenantId` here filed "operator impersonated one of your

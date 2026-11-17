@@ -1938,16 +1938,44 @@ export class IamService {
     token_type: string;
     impersonating: { userId: string; email: string; tenantId: string };
   }> {
-    // `roles` is a simple-array column on the user, not a relation — no
-    // `relations: ['roles']` here, which would throw at query time.
-    const target = await this.userRepo.findOne({
-      where: { tenantId: targetTenantId, status: UserStatus.ACTIVE },
-      order: { createdAt: 'ASC' },
-    });
+    // Nested impersonation (Anton). Impersonating a `platform_admin` hands
+    // the session the right to impersonate again, and the second token's
+    // `imp` would name the impersonated admin — the real operator drops out
+    // of the trail. So: never the operator's own tenant (the controller
+    // refuses it first; this is the second wall), and never a user holding
+    // `platform_admin`, in any tenant.
+    if (targetTenantId === operator.tenantId) {
+      throw new ForbiddenException(
+        'Cannot impersonate a user in your own tenant',
+      );
+    }
+
+    // `roles` is a simple-array column (comma-joined text), not a relation,
+    // so "does not hold platform_admin" is filtered here rather than in SQL.
+    // Paged, earliest first, so a tenant with many active users is not read
+    // whole to find one. Tenant scope: `tenantId` in the WHERE clause, and
+    // only that. The caller wraps this in `runAsGod`, which BYPASSES RLS (it
+    // does not bind the target tenant), so dropping that predicate would
+    // read every tenant's users.
+    const PAGE = 50;
+    let target: User | undefined;
+    for (let skip = 0; !target; skip += PAGE) {
+      const page = await this.userRepo.find({
+        where: { tenantId: targetTenantId, status: UserStatus.ACTIVE },
+        order: { createdAt: 'ASC', id: 'ASC' },
+        skip,
+        take: PAGE,
+      });
+      target = page.find(
+        (u) => !(u.roles ?? []).includes(PlatformRole.PLATFORM_ADMIN),
+      );
+      if (page.length < PAGE) break;
+    }
 
     if (!target) {
       throw new BadRequestException(
-        `Tenant ${targetTenantId} has no active user to impersonate`,
+        `Tenant ${targetTenantId} has no active user that may be impersonated ` +
+          `(a platform_admin account is never impersonated)`,
       );
     }
 

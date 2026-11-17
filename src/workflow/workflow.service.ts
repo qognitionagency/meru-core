@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   Inject,
   forwardRef,
 } from '@nestjs/common';
@@ -10,6 +11,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
 import { Actor, hasTenantWideReach, SYSTEM_ACTOR } from '../common/access';
+import type { UserPayload } from '../common/types';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -82,6 +84,15 @@ export interface TransitionRequest {
    * not who the permission gate evaluates against. ADR 0018 §4.
    */
   automated?: { by: string; reason?: string };
+  /**
+   * Set when the caller holds an impersonation token — the controller passes
+   * `req.user.impersonatedBy`, which `JwtStrategy` sets only from the signed
+   * `imp` claim, never from request input. A `requiresSignOff` transition
+   * refuses it (403): a sign-off is a professional act by the credential
+   * holder, and under impersonation `userId` is that holder while the person
+   * acting is a platform operator.
+   */
+  impersonatedBy?: UserPayload['impersonatedBy'];
   context?: Record<string, any>;
 }
 
@@ -556,6 +567,17 @@ export class WorkflowEngineService {
       'id' | 'practitionerCredential' | 'practitionerCredentialType'
     > | null = null;
     if (transition.permissions.requiresSignOff) {
+      // Before the credential read: an operator impersonating a credentialed
+      // user would otherwise pass this gate on that user's credential, and
+      // `history[].signedOffBy` would name a practitioner who did nothing.
+      if (request.impersonatedBy) {
+        throw new ForbiddenException(
+          `Transition to '${transition.toState.name}' requires sign-off by a ` +
+            `registered practitioner, and cannot be signed off from an ` +
+            `impersonation session. The practitioner must do it in their own ` +
+            `session.`,
+        );
+      }
       signOffActor = await this.usersRepo.findOne({
         where: { id: request.userId, tenantId: instance.tenantId },
         select: ['id', 'practitionerCredential', 'practitionerCredentialType'],

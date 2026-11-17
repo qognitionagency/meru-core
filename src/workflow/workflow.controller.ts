@@ -256,6 +256,9 @@ export class WorkflowController {
       // carries `permissions.roles` and no `users`, so the actor's own roles
       // are the only thing that can satisfy it.
       userRoles: req.user.roles ?? [],
+      // From the signed `imp` claim (JwtStrategy). A sign-off transition
+      // refuses an impersonation session; see TransitionRequest.
+      impersonatedBy: req.user.impersonatedBy,
       context: dto.context,
     });
     return instance;

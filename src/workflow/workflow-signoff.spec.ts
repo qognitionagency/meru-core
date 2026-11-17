@@ -1,5 +1,6 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { WorkflowEngineService } from './workflow.service';
+import { WorkflowController } from './workflow.controller';
 import { InstanceStatus } from './entities/workflow-instance.entity';
 import { PlatformRole } from '../iam/enums/platform-role.enum';
 
@@ -191,6 +192,90 @@ describe('WorkflowEngineService.transition — sign-off gate (ADR 0027)', () => 
     expect(instance.history[0].signedOffCredential).toEqual({
       type: 'marn',
       number: 'MARN1234567',
+    });
+  });
+
+  /**
+   * Anton: an operator impersonating a firm member could sign off a
+   * regulated step under that member's practitioner credential, and
+   * `history[]` would name the practitioner. A sign-off is a professional
+   * act by the credential holder; an impersonation session is an operator
+   * diagnosing. It is refused before the credential is even read.
+   */
+  describe('an impersonation session cannot sign off', () => {
+    const IMP = { operatorId: 'op-1', operatorTenantId: 'platform-1' };
+    const credentialed = {
+      id: 'staff-1',
+      practitionerCredential: 'MARN1234567',
+      practitionerCredentialType: 'marn',
+    };
+
+    it('403 on a requiresSignOff transition, even for a credentialed user; nothing recorded', async () => {
+      const { service, instance, usersRepo } = buildService({
+        requiresSignOff: true,
+        actorRow: credentialed,
+      });
+
+      const attempt = service.transition({
+        instanceId: instance.id,
+        tenantId: TENANT,
+        transitionId: 'trans-1',
+        userId: 'staff-1',
+        userRoles: [PlatformRole.STAFF],
+        impersonatedBy: IMP,
+        context: {},
+      });
+
+      await expect(attempt).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(attempt).rejects.toThrow(/impersonation/i);
+      expect(usersRepo.findOne).not.toHaveBeenCalled();
+      expect(instance.history).toHaveLength(0);
+    });
+
+    it('a transition without requiresSignOff is unaffected by impersonation', async () => {
+      const { service, instance } = buildService({
+        requiresSignOff: false,
+        actorRow: null,
+      });
+
+      await service.transition({
+        instanceId: instance.id,
+        tenantId: TENANT,
+        transitionId: 'trans-1',
+        userId: 'staff-1',
+        userRoles: [PlatformRole.STAFF],
+        impersonatedBy: IMP,
+        context: {},
+      });
+
+      expect(instance.history).toHaveLength(1);
+    });
+
+    it('the controller threads impersonatedBy from the validated token', async () => {
+      const transition = jest.fn().mockResolvedValue({});
+      const controller = new WorkflowController(
+        { transition } as any,
+        {} as any,
+        {} as any,
+      );
+
+      await controller.transition(
+        {
+          user: {
+            id: 'staff-1',
+            email: 's@firm.test',
+            tenantId: TENANT,
+            roles: [PlatformRole.STAFF],
+            impersonatedBy: IMP,
+          },
+        },
+        'inst-1',
+        { transitionId: 'trans-1' } as any,
+      );
+
+      expect(transition).toHaveBeenCalledWith(
+        expect.objectContaining({ impersonatedBy: IMP }),
+      );
     });
   });
 });

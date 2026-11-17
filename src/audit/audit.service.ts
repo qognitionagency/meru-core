@@ -680,6 +680,8 @@ export class AuditService {
   private convertToCSV(logs: AuditLog[]): string {
     if (logs.length === 0) return '';
 
+    // The four context columns are appended, never interleaved: a spreadsheet
+    // someone already reconciles against keeps its columns where they were.
     const headers = [
       'timestamp',
       'userId',
@@ -688,6 +690,7 @@ export class AuditService {
       'entityId',
       'severity',
       'description',
+      ...EXPORTED_CONTEXT_FIELDS,
     ];
     const rows = logs.map((log) => [
       log.timestamp,
@@ -697,6 +700,7 @@ export class AuditService {
       log.entityId,
       log.severity,
       log.description || '',
+      ...EXPORTED_CONTEXT_FIELDS.map((f) => contextField(log, f)),
     ]);
 
     // `r.join(',')` was wrong for any description containing a comma, a quote or
@@ -706,20 +710,27 @@ export class AuditService {
     return toCsv(headers, rows);
   }
 
+  // Every value is escaped. `reason` and `description`-like context are free
+  // text, and an unescaped `</reason><impersonatedBy>…` would forge an element
+  // in a file whose whole purpose is to be believed.
   private convertToXML(logs: AuditLog[]): string {
     const entries = logs
-      .map(
-        (log) => `
+      .map((log) => {
+        const contextElements = EXPORTED_CONTEXT_FIELDS.map(
+          (f) => `      <${f}>${xmlEscape(contextField(log, f))}</${f}>`,
+        ).join('\n');
+        return `
     <entry>
-      <timestamp>${log.timestamp.toISOString()}</timestamp>
-      <userId>${log.userId}</userId>
-      <action>${log.action}</action>
-      <entityType>${log.entityType}</entityType>
-      <entityId>${log.entityId}</entityId>
-      <severity>${log.severity}</severity>
+      <timestamp>${xmlEscape(log.timestamp.toISOString())}</timestamp>
+      <userId>${xmlEscape(log.userId)}</userId>
+      <action>${xmlEscape(log.action)}</action>
+      <entityType>${xmlEscape(log.entityType)}</entityType>
+      <entityId>${xmlEscape(log.entityId)}</entityId>
+      <severity>${xmlEscape(log.severity)}</severity>
+${contextElements}
     </entry>
-    `,
-      )
+    `;
+      })
       .join('');
 
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -727,4 +738,38 @@ export class AuditService {
   ${entries}
 </auditLog>`;
   }
+}
+
+/**
+ * The `context` keys an export must carry (ADR 0023 D13, D15): `changeId`
+ * ties a request row to its outcome, `event` names the phase, `reason` says
+ * why a change did not take effect, `impersonatedBy` names the operator behind
+ * an impersonated action. Without them an exported strict-change trail cannot
+ * say whether a change happened or who made it. JSON exports carry the whole
+ * row and need no list.
+ */
+const EXPORTED_CONTEXT_FIELDS = [
+  'changeId',
+  'event',
+  'reason',
+  'impersonatedBy',
+] as const;
+
+/** A context value as export text: '' when absent, JSON when structured. */
+function contextField(
+  log: AuditLog,
+  field: (typeof EXPORTED_CONTEXT_FIELDS)[number],
+): string {
+  const value = (log.context as Record<string, unknown> | null)?.[field];
+  if (value === null || value === undefined) return '';
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+}
+
+function xmlEscape(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }

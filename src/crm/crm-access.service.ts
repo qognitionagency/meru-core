@@ -162,7 +162,9 @@ export class CrmAccessService {
   /**
    * Narrow a list query to what the caller may see.
    *
-   * **Not currently wired to any route** — `/crm/entities` is protected by
+   * **Wired since 2026-11-17 to `PackDashboardService.scan`** — every
+   * dashboard widget and trend a non-staff caller resolves. `/crm/entities`
+   * itself is still protected by
    * `CrmController.clientScoped()`, which rewrites the query DTO's
    * `subjectEmail` before it ever reaches `CrmService`, not by this method.
    * The comment that used to stand here claimed "applied in the service so

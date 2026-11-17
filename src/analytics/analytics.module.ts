@@ -12,6 +12,7 @@ import { PackDashboardService } from './pack-dashboard.service';
 import { RuleEvaluatorModule } from '../rules/rule-evaluator.module';
 import { VerticalPackModule } from '../tenant/vertical-pack.module';
 import { TenantModule } from '../tenant/tenant.module';
+import { CrmAccessService } from '../crm/crm-access.service';
 
 @Module({
   imports: [
@@ -33,7 +34,11 @@ import { TenantModule } from '../tenant/tenant.module';
     forwardRef(() => TenantModule),
   ],
   controllers: [AnalyticsController],
-  providers: [AnalyticsService, PackDashboardService],
+  // CrmAccessService is provided here rather than exported from CrmModule:
+  // it has no dependencies and no state, and importing CrmModule would pull
+  // its whole graph (and its forwardRef cycles) into analytics for one
+  // predicate. Same class, same rule — PackDashboardService own-scopes with it.
+  providers: [AnalyticsService, PackDashboardService, CrmAccessService],
   exports: [AnalyticsService, PackDashboardService],
 })
 export class AnalyticsModule {}

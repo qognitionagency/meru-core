@@ -1,12 +1,15 @@
 import { PackDashboardService } from './pack-dashboard.service';
 import { PackUiService } from '../tenant/services/pack-ui.service';
 import { RuleEvaluatorService } from '../rules/rule-evaluator.service';
+import { CrmAccessService } from '../crm/crm-access.service';
 
 /**
  * The failure this file exists to prevent is a dashboard that renders a
  * confident zero. Every assertion below is either "the number is right" or
  * "there is no number and it says why".
  */
+const STAFF_ACTOR = { id: 'staff-1', roles: ['staff'] };
+
 describe('PackUiService — who sees what', () => {
   const pack = {
     navigation: [
@@ -187,6 +190,7 @@ describe('PackDashboardService — widget arithmetic', () => {
     ui as any,
     packs as any,
     new RuleEvaluatorService(),
+    new CrmAccessService(),
   );
 
   let resolved: Awaited<ReturnType<PackDashboardService['resolve']>>;
@@ -196,7 +200,7 @@ describe('PackDashboardService — widget arithmetic', () => {
     resolved = await service.resolve('t1', 'immigration', 'd', {
       roles: ['staff'],
       modules: null,
-    });
+    }, STAFF_ACTOR);
   });
 
   it('computes a percentage over its declared population, not over everything', () => {
@@ -246,7 +250,7 @@ describe('PackDashboardService — widget arithmetic', () => {
     const unfiltered = await service.resolve('t1', 'immigration', 'd', {
       roles: ['staff'],
       modules: null,
-    });
+    }, STAFF_ACTOR);
     expect(unfiltered).toBeDefined();
     expect(entities.count).not.toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ type: 'nope' }) }),
@@ -311,6 +315,10 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
     { key: 'declared_only', label: 'Declared', unit: 'count' as const },
   ];
 
+  // These specs pin the series maths; the audience gate has its own spec
+  // (trend-audience.spec.ts), so every call here is made as tenant staff.
+  const STAFF = { roles: ['staff'], modules: null };
+
   const build = (scanRows = rows, truncatedScan = false) => {
     const entities = {
       count: jest.fn(),
@@ -343,6 +351,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       { dashboardFor: jest.fn(), dashboardsFor: jest.fn() } as any,
       packs as any,
       new RuleEvaluatorService(),
+      new CrmAccessService(),
     );
   };
 
@@ -355,7 +364,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets).toHaveLength(3);
     expect(out.buckets[0].periodStart).toBe('2026-06-01T00:00:00.000Z');
     expect(out.buckets[2].periodStart).toBe('2026-08-01T00:00:00.000Z');
@@ -367,7 +376,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets[0].value).toBe(50);
     expect(out.buckets[2].value).toBe(100);
   });
@@ -379,7 +388,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     const july = out.buckets[1];
     expect(july.value).toBeNull();
     expect(july.unavailableReason).toBe('no_records_in_population');
@@ -393,7 +402,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets[1].value).toBe(0);
     expect(out.buckets[1].unavailableReason).toBeUndefined();
   });
@@ -405,20 +414,20 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets[0].population).toBe(2);
     expect(out.buckets[2].population).toBe(2);
   });
 
   it('distinguishes a missing KPI from a KPI with no metric', async () => {
     const svc = build();
-    const missing = await svc.trend('t1', 'immigration', { kpiKey: 'nope' });
+    const missing = await svc.trend('t1', 'immigration', { kpiKey: 'nope' }, STAFF, STAFF_ACTOR);
     expect(missing.unavailableReason).toBe('kpi_not_in_pack');
     expect(missing.buckets).toEqual([]);
 
     const declared = await svc.trend('t1', 'immigration', {
       kpiKey: 'declared_only',
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(declared.unavailableReason).toBe('kpi_has_no_metric');
   });
 
@@ -430,7 +439,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.truncated).toBe(true);
   });
 
@@ -442,7 +451,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'week',
       from: at('2026-08-03T00:00:00Z'),
       to: at('2026-08-17T00:00:00Z'),
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets[0].periodStart).toBe('2026-08-03T00:00:00.000Z');
     // Both August records (2nd and 9th) — the 2nd falls before the window, the
     // 9th is a Sunday and belongs to the week beginning the 3rd.
@@ -458,7 +467,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'month',
       from: june1,
       to: sept1,
-    });
+    }, STAFF, STAFF_ACTOR);
     const counted = out.buckets.filter((b) => (b.value ?? 0) > 0);
     expect(counted).toHaveLength(1);
     expect(counted[0].periodStart).toBe('2026-07-01T00:00:00.000Z');
@@ -474,7 +483,7 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       from: june1,
       to: sept1,
       dateField: 'decidedAt',
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets[0].value).toBe(0);
     expect(out.buckets[2].value).toBe(1);
   });
@@ -485,12 +494,12 @@ describe('PackDashboardService.trend — over time, without inventing zeroes', (
       interval: 'day',
       from: at('2010-01-01T00:00:00Z'),
       to: at('2026-08-11T00:00:00Z'),
-    });
+    }, STAFF, STAFF_ACTOR);
     expect(out.buckets.length).toBeLessThanOrEqual(400);
   });
 
   it('defaults to a window worth charting', async () => {
-    const out = await build().trend('t1', 'immigration', { kpiKey: 'volume' });
+    const out = await build().trend('t1', 'immigration', { kpiKey: 'volume' }, STAFF, STAFF_ACTOR);
     expect(out.interval).toBe('month');
     expect(out.buckets.length).toBeGreaterThanOrEqual(11);
     expect(out.buckets.length).toBeLessThanOrEqual(13);

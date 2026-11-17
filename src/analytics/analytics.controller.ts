@@ -172,11 +172,14 @@ export class AnalyticsController {
       req.user.roles ?? [],
       null,
     );
+    // Tenant from the JWT; the widgets are own-scoped to this actor in the
+    // service for anyone without tenant-wide reach.
     return this.packDashboards.resolve(
       req.user.tenantId,
       req.tenantVertical ?? null,
       key,
       audience,
+      { id: req.user.id, roles: req.user.roles ?? [], email: req.user.email },
     );
   }
 
@@ -225,13 +228,25 @@ export class AnalyticsController {
     @Param('kpiKey') kpiKey: string,
     @Query() query: TrendQueryDto,
   ) {
-    return this.packDashboards.trend(req.user.tenantId, req.tenantVertical ?? null, {
-      kpiKey,
-      interval: query.interval,
-      from: query.from ? new Date(query.from) : undefined,
-      to: query.to ? new Date(query.to) : undefined,
-      dateField: query.dateField,
-    });
+    // From the token, never the query: the service gates non-staff callers.
+    const audience = await this.packUi.audienceFor(
+      req.user.tenantId,
+      req.user.roles ?? [],
+      null,
+    );
+    return this.packDashboards.trend(
+      req.user.tenantId,
+      req.tenantVertical ?? null,
+      {
+        kpiKey,
+        interval: query.interval,
+        from: query.from ? new Date(query.from) : undefined,
+        to: query.to ? new Date(query.to) : undefined,
+        dateField: query.dateField,
+      },
+      audience,
+      { id: req.user.id, roles: req.user.roles ?? [], email: req.user.email },
+    );
   }
 
   // ==================== WIDGETS ====================

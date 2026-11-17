@@ -1382,3 +1382,38 @@ branch is not a change the portals can see (`/api-json` is the check).
      now dials through `http(s).request` with `guardedLookup`, so the address
      connected to is the one checked (the DNS-rebinding window is closed; no
      new dependency). A 3xx from the provider is refused, not followed.
+   - **`GET /analytics/trends/:kpiKey` (Anton #8):** a caller who is not tenant
+     staff gets **404** unless a client-portal dashboard visible to them shows
+     that KPI as a `kpi` widget. Staff are unchanged.
+   - **`GET /analytics/dashboards` and `GET /analytics/dashboards/:key`:** a
+     caller who is not tenant staff now sees **client-portal** dashboards only,
+     whatever `?portal=` says. Before this, `:key` passed no portal at all, so a
+     `client` token could resolve the staff `firm_home` dashboard (no roles
+     declared) and read firm-wide KPIs. A staff dashboard key now answers
+     **404** to a client. Callers (grepped): immistack workspace trends and
+     governancex KPIs, both staff screens, so unaffected.
+   - **Correction (Owen's gate, 2026-11-17): the portal restriction above did
+     NOT make this path safe for clients, and the line that said so was
+     wrong.** Forcing a client onto the client portal routed every client to
+     the immigration pack's `client_home`, whose `my_cases` `list` widget read
+     `case` rows filtered on tenant and type only — so a `client` token got
+     the firm's five most recently updated cases (id, name or email, status,
+     due date, assignee). The seventh instance of the within-tenant class.
+     **Fixed, not deployed:** every record-reading widget (`list`, `count`,
+     `chart`, `kpi`) and `GET /analytics/trends/:kpiKey` are now computed over
+     the caller's own records for anyone without tenant-wide reach, using
+     `CrmAccessService.applyScope` — the same assignee-or-SUBJECT rule as
+     `/crm/entities/:id`. A client with no email on the token sees nothing.
+     A `kpi` on a client dashboard is therefore the client's own figure, not
+     the firm's. Staff and GRC staff are unchanged. Spec:
+     `src/analytics/dashboard-own-scope.spec.ts`. No frontend calls
+     `client_home` today (grepped all three apps 2026-11-17), so nothing
+     renders differently.
+   - **`platform_admin` is not tenant staff on these routes**, so a bare
+     operator token is put on the client portal and own-scoped. That is
+     deliberate and fails closed: `grc.json`'s `mlro_home` lists
+     `platform_admin` in `roles`, and that entry is unreachable. Opening it
+     would mean either firm-wide data on a bare token (the reach
+     `common/access.ts` reserves for `runAsGod`) or staff KPIs computed over
+     the operator's own records (zero, rendered as a firm figure). Needs a
+     decision, not a role-set edit.

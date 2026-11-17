@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Actor, hasTenantWideReach, isTenantStaff } from '../common/access';
+import { CrmAccessService } from '../crm/crm-access.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { UniversalEntity } from '../crm/entities/universal-entity.entity';
@@ -10,6 +12,19 @@ import {
   PackUiService,
   UiAudience,
 } from '../tenant/services/pack-ui.service';
+
+/**
+ * A caller who is not tenant staff sees client-portal dashboards only,
+ * whatever portal they asked for (the list route takes `?portal=` from the
+ * query string, the by-key route passed none, so the portal filter never
+ * applied). Without this a client resolved the staff `firm_home` dashboard,
+ * which declares no roles. Found alongside Anton's #8, 2026-11-17.
+ */
+function forCaller(audience: UiAudience): UiAudience {
+  return isTenantStaff(audience?.roles ?? [])
+    ? audience
+    : { ...audience, portal: 'client' };
+}
 
 /** One `kpis[]` entry, including the optional `metric` that computes it. */
 export interface KpiDefinition {
@@ -110,6 +125,12 @@ export class PackDashboardService {
     private readonly ui: PackUiService,
     private readonly packs: VerticalPackService,
     private readonly evaluator: RuleEvaluatorService,
+    /**
+     * Who owns which record. The same `applyScope` rule `/crm/entities/:id`
+     * answers with (`ownsEntity`), so a client's dashboard can never show a
+     * record the CRM routes would 404.
+     */
+    private readonly access: CrmAccessService,
   ) {}
 
   /** Definitions only — what the caller may open. */
@@ -117,7 +138,7 @@ export class PackDashboardService {
     vertical: string | null,
     audience: UiAudience,
   ): Promise<DashboardDefinition[]> {
-    return this.ui.dashboardsFor(vertical, audience);
+    return this.ui.dashboardsFor(vertical, forCaller(audience));
   }
 
   /** One dashboard, with every widget resolved against the tenant's data. */
@@ -126,8 +147,17 @@ export class PackDashboardService {
     vertical: string | null,
     key: string,
     audience: UiAudience,
+    /**
+     * Whose records the widgets are computed over. Required, not defaulted:
+     * a caller that forgot it must not compile into the firm-wide view.
+     */
+    actor: Actor,
   ): Promise<ResolvedDashboard> {
-    const dashboard = await this.ui.dashboardFor(vertical, key, audience);
+    const dashboard = await this.ui.dashboardFor(
+      vertical,
+      key,
+      forCaller(audience),
+    );
     const kpis = await this.packs.list<KpiDefinition>(vertical, 'kpis');
     const documentTypes = await this.packs.list<DocumentTypeDefinition>(
       vertical,
@@ -137,7 +167,7 @@ export class PackDashboardService {
     const widgets: ResolvedWidget[] = [];
     for (const widget of dashboard.widgets ?? []) {
       widgets.push(
-        await this.resolveWidget(tenantId, widget, kpis, documentTypes),
+        await this.resolveWidget(tenantId, widget, kpis, documentTypes, actor),
       );
     }
 
@@ -155,6 +185,7 @@ export class PackDashboardService {
     widget: DashboardWidgetDefinition,
     kpis: KpiDefinition[],
     documentTypes: DocumentTypeDefinition[],
+    actor: Actor,
   ): Promise<ResolvedWidget> {
     const base: ResolvedWidget = {
       key: widget.key,
@@ -168,13 +199,13 @@ export class PackDashboardService {
     try {
       switch (widget.type) {
         case 'kpi':
-          return await this.resolveKpi(tenantId, base, widget, kpis);
+          return await this.resolveKpi(tenantId, base, widget, kpis, actor);
         case 'count':
-          return await this.resolveCount(tenantId, base, widget);
+          return await this.resolveCount(tenantId, base, widget, actor);
         case 'list':
-          return await this.resolveList(tenantId, base, widget);
+          return await this.resolveList(tenantId, base, widget, actor);
         case 'chart':
-          return await this.resolveChart(tenantId, base, widget);
+          return await this.resolveChart(tenantId, base, widget, actor);
         case 'checklist':
           return {
             ...base,
@@ -225,6 +256,8 @@ export class PackDashboardService {
       /** Which date buckets a row. Defaults to `createdAt`. */
       dateField?: string;
     },
+    audience: UiAudience,
+    actor: Actor,
   ): Promise<{
     kpi: string;
     label: string;
@@ -249,6 +282,27 @@ export class PackDashboardService {
     const dateField = options.dateField ?? 'createdAt';
     const to = options.to ?? new Date();
     const from = options.from ?? defaultFrom(to, interval);
+
+    // Audience (Anton, 2026-11-17, #8). The series is tenant-wide, so only
+    // tenant staff may trend any KPI. Anyone else may trend a KPI only if a
+    // client-portal dashboard visible to them shows it as a `kpi` widget —
+    // the pack author's decision that clients see that figure. Otherwise 404,
+    // not 403, as for dashboards. Decided before anything is scanned.
+    if (!isTenantStaff(audience?.roles ?? [])) {
+      const visible = await this.ui.dashboardsFor(vertical, {
+        roles: audience?.roles ?? [],
+        modules: audience?.modules ?? null,
+        portal: 'client',
+      });
+      const shown = visible.some((d) =>
+        (d.widgets ?? []).some(
+          (w) => w.type === 'kpi' && w.source === options.kpiKey,
+        ),
+      );
+      if (!shown) {
+        throw new NotFoundException(`No trend '${options.kpiKey}' for this caller`);
+      }
+    }
 
     const kpis = await this.packs.list<KpiDefinition>(vertical, 'kpis');
     const kpi = kpis.find((k) => k.key === options.kpiKey);
@@ -277,7 +331,11 @@ export class PackDashboardService {
     if (!kpi) return { ...shell, unavailableReason: 'kpi_not_in_pack' };
     if (!kpi.metric) return { ...shell, unavailableReason: 'kpi_has_no_metric' };
 
-    const { rows, truncated } = await this.scan(tenantId, kpi.metric.source);
+    const { rows, truncated } = await this.scan(
+      tenantId,
+      kpi.metric.source,
+      actor,
+    );
 
     const periods = buildPeriods(from, to, interval);
     const buckets = periods.map((period) => {
@@ -323,6 +381,7 @@ export class PackDashboardService {
     base: ResolvedWidget,
     widget: DashboardWidgetDefinition,
     kpis: KpiDefinition[],
+    actor: Actor,
   ): Promise<ResolvedWidget> {
     const kpi = kpis.find((k) => k.key === widget.source);
     if (!kpi) {
@@ -340,7 +399,11 @@ export class PackDashboardService {
       return { ...out, unavailableReason: 'kpi_has_no_metric' };
     }
 
-    const { rows, truncated } = await this.scan(tenantId, kpi.metric.source);
+    const { rows, truncated } = await this.scan(
+      tenantId,
+      kpi.metric.source,
+      actor,
+    );
     const computed = this.aggregate(kpi.metric, rows);
 
     return {
@@ -356,17 +419,23 @@ export class PackDashboardService {
     tenantId: string,
     base: ResolvedWidget,
     widget: DashboardWidgetDefinition,
+    actor: Actor,
   ): Promise<ResolvedWidget> {
     // No filter means the database can count without sending rows, which is
     // both faster and exact — a `count` widget with no `when` never truncates.
-    if (widget.when === undefined || widget.when === null) {
+    // Tenant-wide callers only: this count has no ownership predicate, so
+    // everyone else takes the own-scoped scan below.
+    if (
+      (widget.when === undefined || widget.when === null) &&
+      hasTenantWideReach(actor)
+    ) {
       const value = await this.entities.count({
         where: { tenantId, type: widget.source as UniversalEntity['type'] },
       });
       return { ...base, value, unit: 'count', truncated: false };
     }
 
-    const { rows, truncated } = await this.scan(tenantId, widget.source);
+    const { rows, truncated } = await this.scan(tenantId, widget.source, actor);
     const value = rows.filter((r) => this.matches(widget.when, r)).length;
 
     return { ...base, value, unit: 'count', scanned: rows.length, truncated };
@@ -376,8 +445,9 @@ export class PackDashboardService {
     tenantId: string,
     base: ResolvedWidget,
     widget: DashboardWidgetDefinition,
+    actor: Actor,
   ): Promise<ResolvedWidget> {
-    const { rows, truncated } = await this.scan(tenantId, widget.source);
+    const { rows, truncated } = await this.scan(tenantId, widget.source, actor);
     const limit = Math.min(widget.limit ?? 10, PackDashboardService.MAX_LIST);
 
     const items = rows
@@ -407,8 +477,9 @@ export class PackDashboardService {
     tenantId: string,
     base: ResolvedWidget,
     widget: DashboardWidgetDefinition,
+    actor: Actor,
   ): Promise<ResolvedWidget> {
-    const { rows, truncated } = await this.scan(tenantId, widget.source);
+    const { rows, truncated } = await this.scan(tenantId, widget.source, actor);
     const field = widget.groupBy ?? 'status';
 
     const buckets = new Map<string, number>();
@@ -505,16 +576,26 @@ export class PackDashboardService {
    * Newest first, so a truncated scan holds the rows a dashboard is most
    * likely to be about. RLS scopes the read on the connection; the explicit
    * `tenantId` predicate is belt-and-braces and keeps the index in play.
+   *
+   * Tenant scope: `tenantId` comes from the caller's JWT (controller), RLS on
+   * the `meru_app` connection, and this predicate. User scope inside the
+   * tenant: `CrmAccessService.applyScope` — a no-op for tenant-wide reach,
+   * otherwise the caller's own records (assignee or SUBJECT). RLS isolates
+   * tenants, not users; without this a `client` read the firm's caseload
+   * through `client_home` (Owen, 2026-11-17, the seventh instance).
    */
   private async scan(
     tenantId: string,
     entityType: string,
+    actor: Actor,
   ): Promise<{ rows: UniversalEntity[]; truncated: boolean }> {
-    const rows = await this.entities
+    const qb = this.entities
       .createQueryBuilder('e')
       .where('e."tenantId" = :tenantId', { tenantId })
       .andWhere('e.type = :type', { type: entityType })
-      .andWhere('e."deletedAt" IS NULL')
+      .andWhere('e."deletedAt" IS NULL');
+    this.access.applyScope(qb, actor, 'e');
+    const rows = await qb
       .orderBy('e."updatedAt"', 'DESC')
       .take(PackDashboardService.MAX_SCAN + 1)
       .getMany();

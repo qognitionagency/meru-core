@@ -17,7 +17,7 @@ a GitHub account with admin on `qognitionagency/meru-core` and `qognitionagency/
 > **Do not claim document encryption at rest to anyone.** The reasons, and what the fix does and does not close, are in the banner at the top of §4. Luke's document-key fix is carried on branch `wave0/back-online` and is **not deployed anywhere**; Render builds only what is pushed to the branch the Blueprint names (§2 step 2), and `git log origin/wave0/back-online..` in `meru-core` shows what has not reached it yet.
 > What *was* verified locally: `pnpm install --frozen-lockfile --prod=false && pnpm run build`
 > exits 0 on a clean copy of the tree and produces `dist/src/main.js`; `pnpm prune --prod` exits 0
-> and leaves `bcrypt` and `@nestjs/core` loadable. That ran on Node 25 and pnpm 10.26.2, **not Node 20**, and before Luke's document-key change, so it is not evidence about the tree as it now stands.
+> and leaves `bcrypt` and `@nestjs/core` loadable. That ran on Node 25 and pnpm 10.26.2, **not Node 22**, and before Luke's document-key change, so it is not evidence about the tree as it now stands.
 
 ---
 
@@ -494,7 +494,7 @@ fault against live data. Owen (`quality`) requires this run before the Blueprint
 |---|---|
 | Command | `node dist/src/main` (the blueprint's `startCommand`), from a `pnpm run build` of the branch Render will build |
 | `NODE_ENV` | `production` |
-| Node | **20**, matching `NODE_VERSION=20`. The authoring machine has Node 25; a pass there does not count |
+| Node | **22**, matching `NODE_VERSION=22` and `.nvmrc`. The authoring machine has Node 25; a pass there does not count |
 | Database role | `meru_app` (no `BYPASSRLS`) via `DATABASE_APP_URL`, direct endpoint, never `-pooler` |
 | Database | **Non-production** Postgres with **all migrations applied**, including the key-erase migration (applied by §4 step 6): the step 5 Neon rehearsal branch of the control plane, after step 6 has run on it |
 | Secrets | Synthetic values for `JWT_SECRET`, `DOCUMENT_ENCRYPTION_KEY`, `CREDENTIALS_ENCRYPTION_KEY` (32+ characters), `CRON_SECRET`; never the production ones. Set `SKIP_CONFIG_PACK_LOADER=true`, as the blueprint does. Do not set any `VERCEL*` variable |
@@ -505,14 +505,14 @@ fault against live data. Owen (`quality`) requires this run before the Blueprint
 Also expect, with the variable unset, the line `INTERNAL_SCHEDULER is off - processor loop disabled`; with
 `on`, its absence. Record the Node version (`node -v`) and both outputs. A failure in either run blocks step 10 (the Blueprint).
 
-**Does not count:** the first Render deploy; any run on Node other than 20; any run against the
+**Does not count:** the first Render deploy; any run on Node other than 22; any run against the
 production database; a run with an owner role (`neondb_owner`, which has `BYPASSRLS` and defeats the
 boot check this exists to exercise).
 
 **Status as of 2026-11-17: cannot be run today.** No suitable database is reachable: the live control plane
 (`ep-small-darkness-aeyx0p5j`) belongs to a Neon account that is **not** the one currently signed in on
 the authoring machine (§5), so a branch of it cannot be created. `[NEEDS DATA: access to the Neon account
-that owns the live control plane, to create a branch, a meru_app connection string for it, and a Node 20
+that owns the live control plane, to create a branch, a meru_app connection string for it, and a Node 22
 runtime]`. Booting against the old Singapore project instead would exercise a database whose schema
 predates the 2026-09-10 cutover, which is not the condition Owen asked for.
 
@@ -579,7 +579,7 @@ is `off`, so creation builds once; later pushes deploy nothing.
 | Blueprint value | Why |
 |---|---|
 | `runtime: node`, `region: ohio`, `numInstances: 1` | Control-plane Neon is `us-east-2` (Ohio). One instance because the rate limiter and caches are in-process. |
-| `NODE_VERSION=20` | Matches the old Dockerfile (`node:20-alpine`). **Node 20 is past upstream EOL (2026-04-30).** Not built under Node 20 here. `[UNVERIFIED: build on Node 20; Render accepts the bare "20"]` |
+| `NODE_VERSION=22` | Matches `.nvmrc` and the Dockerfile (`node:22-alpine`). 22, not 20, because the lockfile's six `@supabase/*` packages declare `engines: node >=22.0.0` and Node 20 is past upstream EOL (2026-04-30). Not built under Node 22 here. `[UNVERIFIED: build on Node 22; Render accepts the bare "22"]` |
 | `buildCommand` uses `corepack enable` and `--prod=false` | pnpm is pinned in `package.json` (`pnpm@10.26.2`). `--prod=false` because `nest build` is a devDependency. `[UNVERIFIED: corepack works in Render's native build image]` |
 | `SKIP_CONFIG_PACK_LOADER=true` | Same as Vercel: stored packs stay as they are until you reload deliberately (§9). |
 | `INTERNAL_SCHEDULER=off` | The crons are the single scheduler (§0). Only `on`/`off` are valid; anything else fails boot. |

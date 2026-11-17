@@ -73,11 +73,12 @@
 #     ep-restless-thunder-azgspl7m, ap-southeast-1, Singapore) is the OLD
 #     project. No connection string is touched here, and the vertical DB URLs
 #     still name the old project.
-#   - Node 20, pinned via NODE_VERSION, because the previous Dockerfile used
-#     node:20-alpine. Node 20 reached upstream end-of-life on 2026-04-30, so
-#     this is a pin for continuity, not a recommendation. package.json has no
-#     "engines" field; nothing in the repo has been built under Node 20 on the
-#     authoring machine (Node 25 there). [UNVERIFIED: build + test on Node 20]
+#   - Node 22, pinned via NODE_VERSION, matching .nvmrc and the Dockerfile base
+#     image (change all three together). 22, not 20: the lockfile's @supabase/*
+#     packages declare engines node >=22.0.0, and Node 20 reached upstream
+#     end-of-life on 2026-04-30. package.json has no "engines" field. The
+#     authoring machine runs Node 25. [UNVERIFIED: build + test on Node 22
+#     against the current working tree; Render accepts the bare "22"]
 #   - PORT is deliberately NOT set. Render injects PORT (default 10000) and
 #     src/main.ts reads process.env.PORT. The old blueprint's PORT=8000 is gone.
 #   - Install uses --prod=false: with NODE_ENV=production pnpm would skip
@@ -126,7 +127,7 @@ services:
     envVars:
       - fromGroup: meru-secrets
       - key: NODE_VERSION
-        value: "20"
+        value: "22"
       - key: NODE_ENV
         value: production
       - key: VERTICAL

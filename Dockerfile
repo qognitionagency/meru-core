@@ -12,11 +12,13 @@
 # built. This one installs with pnpm through corepack, which reads the pinned
 # version from package.json.
 #
-# Node 20 matches the previous Dockerfile. Node 20 reached end-of-life
-# 2026-04-30; bump deliberately, after a build + `npm test` under the new major.
+# Node 22 matches .nvmrc and NODE_VERSION in render.yaml (change all three together).
+# 22, not 20: the lockfile's @supabase/* packages declare engines node >=22.0.0, and
+# Node 20 reached end-of-life 2026-04-30.
+# [UNVERIFIED: build + test on Node 22 against the current working tree]
 
 # ---- Builder ----
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -37,7 +39,7 @@ RUN pnpm run build
 RUN pnpm prune --prod
 
 # ---- Production ----
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 WORKDIR /app
 
